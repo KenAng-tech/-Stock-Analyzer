@@ -1,0 +1,57 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 5002,
+    "debug": false,
+    "threaded": true
+  },
+  "cache": {
+    "realtime": 10,
+    "technical": 60,
+    "fundamental": 300,
+    "industry": 600,
+    "kline": 300,
+    "strategy": 120
+  },
+  "strategy": {
+    "max_position": 100,
+    "min_stop_loss": 5,
+    "max_stop_loss": 20,
+    "take_profit_ratio": 2,
+    "trailing_stop_pct": 5,
+    "atr_multiplier_stop": 2.0,
+    "atr_multiplier_profit": 3.0,
+    "kelly_fraction": 0.5,
+    "kelly_max_position": 0.25,
+    "time_stop_days": 60
+  },
+  "signal_weights": {
+    "support_bounce": 1.2,
+    "volume_breakout": 1.0,
+    "oversold_recovery": 0.8,
+    "profit_taking": 1.3,
+    "stop_loss": 1.5,
+    "resistance_rejection": 0.9,
+    "multi_cycle_resonance": 1.4,
+    "trend_following": 1.2,
+    "momentum_continuation": 1.1
+  },
+  "default_stock": {
+    "code": "sz300620",
+    "name": "光库科技",
+    "industry": "光通信",
+    "cost_basis": 120
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    "file": "logs/stock_analyzer.log",
+    "max_bytes": 10485760,
+    "backup_count": 5
+  },
+  "monitor": {
+    "interval": 60,
+    "max_iterations": 0,
+    "alert_interval": 30
+  }
+}

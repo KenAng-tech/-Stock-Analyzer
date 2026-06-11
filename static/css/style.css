@@ -1,0 +1,2769 @@
+/* ============================================================
+   Stock Analyzer v4.0 — Modern Financial Dashboard Design
+   Inspired by: TradingView, Bloomberg Terminal, Figma Community
+   ============================================================ */
+
+/* --- Fonts --- */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+/* --- Design Tokens --- */
+:root {
+  /* Background & Surface */
+  --bg-primary: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #f8fafc;
+  --bg-card: rgba(255, 255, 255, 0.95);
+  --bg-card-hover: rgba(255, 255, 255, 1);
+  --bg-elevated: #ffffff;
+  --bg-inset: #f1f5f9;
+  --bg-glass: rgba(255, 255, 255, 0.7);
+  --bg-glass-hover: rgba(255, 255, 255, 0.9);
+
+  /* Text Colors */
+  --text-primary: #0f172a;
+  --text-secondary: #64748b;
+  --text-tertiary: #94a3b8;
+  --text-inverse: #ffffff;
+  --text-on-dark: #e2e8f0;
+  --text-on-dark-secondary: #94a3b8;
+
+  /* Borders */
+  --border: #e2e8f0;
+  --border-subtle: #f1f5f9;
+  --border-hover: #cbd5e1;
+  --border-glass: rgba(255, 255, 255, 0.5);
+
+  /* Accent Colors */
+  --accent: #2563eb;
+  --accent-light: #3b82f6;
+  --accent-subtle: #dbeafe;
+  --accent-dark: #1d4ed8;
+  --accent-glow: rgba(37, 99, 235, 0.15);
+
+  /* Market Colors — 中国股市: 红涨绿跌 */
+  --bull: #ef4444;       /* 涨 = 红 */
+  --bull-light: #f87171;
+  --bull-dark: #dc2626;
+  --bear: #10b981;       /* 跌 = 绿 */
+  --bear-light: #34d399;
+  --bear-dark: #059669;
+  --neutral: #f59e0b;
+  --neutral-light: #fbbf24;
+  --info: #3b82f6;
+  --info-light: #60a5fa;
+  --purple: #8b5cf6;
+  --purple-light: #a78bfa;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06), 0 2px 4px rgba(0, 0, 0, 0.03);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0, 0, 0, 0.04);
+  --shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.1);
+  --shadow-glow-blue: 0 0 20px rgba(59, 130, 246, 0.2);
+  --shadow-glow-red: 0 0 20px rgba(239, 68, 68, 0.2);
+  --shadow-glow-blue: 0 0 20px rgba(59, 130, 246, 0.2);
+
+  /* Radius */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-2xl: 32px;
+
+  /* Transitions */
+  --transition-fast: 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-normal: 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-slow: 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+
+/* Numeric font for all numbers */
+.card-value, .stat-value, .fund-value, .tech-value, .sr-value, .trend-value,
+.pred-value, .ws-value, .flow-value, .atr-value, .speed-value, .score-text,
+.rsi-value, .dist-bar-value, .chip-bar-value, .ratio-value, .gauge-value-text {
+  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+}
+
+.container { max-width: 1440px; margin: 0 auto; padding: 0 32px; }
+
+/* ============================================================
+   HEADER
+   ============================================================ */
+.header {
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.98) 0%, rgba(15, 23, 42, 0.95) 100%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+.header-content { display: flex; justify-content: space-between; align-items: center; height: 64px; }
+.logo { display: flex; align-items: center; gap: 14px; }
+.logo i {
+  font-size: 24px;
+  background: linear-gradient(135deg, #3b82f6, #60a5fa);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.logo h1 {
+  font-size: 20px;
+  font-weight: 700;
+  color: #f8fafc;
+  letter-spacing: -0.02em;
+}
+.nav { display: flex; gap: 4px; }
+.nav-link {
+  color: var(--text-on-dark-secondary);
+  text-decoration: none;
+  padding: 8px 16px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all var(--transition-normal);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: relative;
+}
+.nav-link:hover {
+  color: #f1f5f9;
+  background: rgba(255, 255, 255, 0.08);
+}
+.nav-link.active {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.15);
+}
+.nav-link.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 20px;
+  height: 2px;
+  background: linear-gradient(90deg, #3b82f6, #60a5fa);
+  border-radius: 1px;
+}
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 6px 14px;
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3b82f6;
+  animation: statusPulse 2s ease-in-out infinite;
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.4);
+}
+.status-dot.offline { background: #ef4444; animation: none; box-shadow: 0 0 8px rgba(239, 68, 68, 0.4); }
+@keyframes statusPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(0.9); }
+}
+.status-text { font-size: 13px; color: rgba(255, 255, 255, 0.8); font-weight: 500; }
+
+/* ============================================================
+   MAIN CONTENT & SECTIONS
+   ============================================================ */
+.main-content { padding: 24px 0 48px; min-height: calc(100vh - 64px); }
+.section { display: none; }
+.section.active { display: block; animation: sectionFadeIn 0.35s ease-out; }
+@keyframes sectionFadeIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+.section-header h2 {
+  font-size: 24px;
+  font-weight: 700;
+  color: #f8fafc;
+  letter-spacing: -0.02em;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.section-header h2 i {
+  background: linear-gradient(135deg, #3b82f6, #60a5fa);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ============================================================
+   DASHBOARD HERO
+   ============================================================ */
+.dashboard-hero {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-bottom: 24px;
+  align-items: stretch;
+}
+.hero-left {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(59, 130, 246, 0.08));
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  border-radius: var(--radius-xl);
+  padding: 28px 32px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+}
+.hero-left::after {
+  content: '';
+  position: absolute;
+  top: -50%;
+  right: -20%;
+  width: 200px;
+  height: 200px;
+  background: radial-gradient(circle, rgba(59, 130, 246, 0.1) 0%, transparent 70%);
+  border-radius: 50%;
+}
+.hero-stock-info {
+  position: relative;
+  z-index: 1;
+}
+.hero-stock-name {
+  font-size: 28px;
+  font-weight: 800;
+  color: #f8fafc;
+  letter-spacing: -0.02em;
+  margin-bottom: 4px;
+}
+.hero-stock-code {
+  font-size: 14px;
+  color: var(--text-on-dark-secondary);
+  font-weight: 500;
+}
+.hero-price-row {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin-top: 16px;
+  position: relative;
+  z-index: 1;
+}
+.hero-price {
+  font-size: 48px;
+  font-weight: 800;
+  color: #f8fafc;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+.hero-change {
+  font-size: 20px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: var(--radius-md);
+}
+.hero-change.positive {
+  color: #ef4444; /* 涨 = 红 */
+  background: rgba(239, 68, 68, 0.15);
+}
+.hero-change.negative {
+  color: #10b981; /* 跌 = 绿 */
+  background: rgba(16, 185, 129, 0.15);
+}
+.hero-right {
+  display: flex;
+  align-items: stretch;
+}
+.hero-selector {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-shadow: var(--shadow-sm);
+  width: 100%;
+}
+.selector-group {
+  flex: 1;
+}
+.selector-group label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.selector-group input,
+.selector-group select {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-family: inherit;
+  background: #ffffff;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.selector-group input:focus,
+.selector-group select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+.selector-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: auto;
+}
+.selector-actions .btn {
+  flex: 1;
+  justify-content: center;
+}
+
+/* ============================================================
+   DASHBOARD STATS GRID
+   ============================================================ */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+.stats-group {
+  background: var(--bg-card);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition-normal);
+}
+.stats-group:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+.stats-group-header {
+  background: linear-gradient(135deg, var(--bg-tertiary), var(--bg-inset));
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.stats-group-header i {
+  color: var(--accent);
+  font-size: 16px;
+}
+.stats-group-header span {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+}
+.stats-group-body {
+  padding: 16px 20px;
+}
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+}
+.stat-row + .stat-row {
+  border-top: 1px solid var(--border-subtle);
+}
+.stat-row .stat-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.stat-row .stat-value {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.stat-row .stat-value.positive { color: #ef4444; } /* 涨 = 红 */
+.stat-row .stat-value.negative { color: #10b981; } /* 跌 = 绿 */
+
+/* ============================================================
+   DASHBOARD OVERVIEW CARDS
+   ============================================================ */
+.overview-cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.card {
+  background: var(--bg-card);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border);
+  padding: 20px;
+  transition: all var(--transition-normal);
+  position: relative;
+  overflow: hidden;
+}
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+}
+.card-price::before { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+.card-profit::before { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+.card-volume::before { background: linear-gradient(90deg, #8b5cf6, #a78bfa); }
+.card-turnover::before { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg);
+  border-color: var(--border-hover);
+}
+.card-highlight {
+  box-shadow: var(--shadow-md);
+}
+.card-icon { font-size: 28px; margin-bottom: 12px; }
+.card-price .card-icon { color: #3b82f6; }
+.card-profit .card-icon { color: #3b82f6; }
+.card-volume .card-icon { color: #8b5cf6; }
+.card-turnover .card-icon { color: #f59e0b; }
+.card-content { }
+.card-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.card-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+.card-change {
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+.card-change.positive { color: #ef4444; } /* 涨 = 红 */
+.card-change.negative { color: #10b981; } /* 跌 = 绿 */
+.card-change.neutral { color: #f59e0b; }
+
+/* ============================================================
+   BUTTONS
+   ============================================================ */
+.btn {
+  padding: 10px 20px;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all var(--transition-normal);
+  letter-spacing: 0.01em;
+  font-family: inherit;
+}
+.btn-primary {
+  background: linear-gradient(135deg, #2563eb, #3b82f6);
+  color: white;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.3);
+}
+.btn-primary:hover {
+  background: linear-gradient(135deg, #1d4ed8, #2563eb);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(37, 99, 235, 0.4);
+}
+.btn-success {
+  background: linear-gradient(135deg, #3b82f6, #60a5fa);
+  color: white;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+}
+.btn-success:hover {
+  background: linear-gradient(135deg, #2563eb, #3b82f6);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4);
+}
+.btn-secondary {
+  background: linear-gradient(135deg, #1e293b, #334155);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.btn-secondary:hover {
+  background: linear-gradient(135deg, #334155, #475569);
+  transform: translateY(-1px);
+}
+
+/* ============================================================
+   STOCK SELECTOR
+   ============================================================ */
+.stock-selector {
+  background: var(--bg-glass);
+  padding: 24px;
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border-glass);
+  margin-bottom: 24px;
+  display: flex;
+  gap: 16px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.form-group { flex: 1; min-width: 140px; }
+.form-group label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.form-group input, .form-group select {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-family: inherit;
+  background: #ffffff;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.form-group input:focus, .form-group select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+/* ============================================================
+   OVERVIEW CARDS
+   ============================================================ */
+.overview-cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.card {
+  background: var(--bg-card);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border);
+  padding: 20px;
+  transition: all var(--transition-normal);
+  position: relative;
+  overflow: hidden;
+}
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+}
+.card-price::before { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+.card-profit::before { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+.card-volume::before { background: linear-gradient(90deg, #8b5cf6, #a78bfa); }
+.card-turnover::before { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg);
+  border-color: var(--border-hover);
+}
+.card-icon { font-size: 28px; margin-bottom: 12px; }
+.card-price .card-icon { color: #3b82f6; }
+.card-profit .card-icon { color: #3b82f6; }
+.card-volume .card-icon { color: #8b5cf6; }
+.card-turnover .card-icon { color: #f59e0b; }
+.card-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.card-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+.card-change {
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+.card-change.positive { color: #ef4444; } /* 涨 = 红 */
+.card-change.negative { color: #10b981; } /* 跌 = 绿 */
+.card-change.neutral { color: #f59e0b; }
+
+/* ============================================================
+   QUICK STATS
+   ============================================================ */
+.quick-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 16px 0;
+}
+.stat-item {
+  background: var(--bg-card);
+  padding: 14px 20px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 100px;
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition-normal);
+}
+.stat-item:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+.stat-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.stat-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+/* ============================================================
+   ANALYSIS SECTION
+   ============================================================ */
+.analysis-content {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.analysis-content > div {
+  background: var(--bg-card);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border);
+  padding: 24px;
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition-normal);
+}
+.analysis-content > div:hover {
+  box-shadow: var(--shadow-md);
+}
+.analysis-content h3 {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.analysis-content h3 i {
+  color: var(--accent);
+}
+
+/* ============================================================
+   METRIC GRID (Fundamental, Technical, etc.)
+   ============================================================ */
+.fund-metrics, .tech-metrics, .sr-metrics, .trend-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+.fund-metric, .tech-metric, .sr-metric, .trend-metric {
+  background: var(--bg-tertiary);
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-left: 3px solid var(--accent);
+  transition: all var(--transition-fast);
+}
+.fund-metric:hover, .tech-metric:hover, .sr-metric:hover, .trend-metric:hover {
+  background: #f1f5f9;
+  transform: translateY(-1px);
+}
+.fund-metric .fund-label, .tech-metric .tech-label,
+.sr-metric .sr-label, .trend-metric .trend-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.fund-metric .fund-value, .tech-metric .tech-value,
+.sr-metric .sr-value, .trend-metric .trend-value {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.fund-level { font-size: 12px; color: var(--text-tertiary); }
+
+/* ============================================================
+   SUPPORT & RESISTANCE
+   ============================================================ */
+.sr-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  margin-bottom: 6px;
+}
+.sr-level {
+  font-weight: 700;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+.sr-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* ============================================================
+   FUND FLOW OPTIMIZED
+   ============================================================ */
+.flow-row-1 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.flow-row-2 {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.flow-card {
+  background: var(--bg-card);
+  border-radius: var(--radius-xl);
+  padding: 20px;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition-normal);
+}
+.flow-card:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+.flow-metric {
+  background: var(--bg-tertiary);
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: all var(--transition-fast);
+}
+.flow-metric:hover {
+  background: #f1f5f9;
+}
+.flow-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.flow-value {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+/* Buy/Sell Ratio */
+.ratio-bar-container { margin: 12px 0; }
+.ratio-bar {
+  display: flex;
+  height: 12px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #e2e8f0;
+}
+.ratio-segment { transition: width 0.6s ease; }
+.ratio-segment.buy { background: linear-gradient(90deg, #ef4444, #f87171); } /* 主力买入 = 红 */
+.ratio-segment.sell { background: linear-gradient(90deg, #10b981, #34d399); } /* 主力卖出 = 绿 */
+.ratio-values {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+.ratio-item { font-size: 13px; font-weight: 600; }
+.ratio-item.buy { color: #ef4444; } /* 主力买入 = 红 */
+.ratio-item.sell { color: #10b981; } /* 主力卖出 = 绿 */
+.ratio-summary {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-size: 13px;
+}
+.ratio-dominant { font-weight: 600; }
+.ratio-strength { color: var(--text-secondary); }
+
+/* Gauge */
+.gauge-container { display: flex; justify-content: center; margin: 8px 0; }
+.gauge-svg { width: 100%; max-width: 200px; }
+.gauge-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.gauge-value-text { font-size: 20px; font-weight: 700; fill: #0f172a; }
+.gauge-level-text { font-size: 12px; fill: #64748b; }
+
+/* Speed */
+.speed-container { text-align: center; }
+.speed-value { font-size: 24px; font-weight: 700; color: var(--text-primary); }
+.speed-bar {
+  height: 8px;
+  background: #e2e8f0;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 8px 0;
+}
+.speed-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #60a5fa);
+  border-radius: 4px;
+  transition: width 0.6s ease;
+}
+.speed-detail { font-size: 12px; color: var(--text-secondary); }
+
+/* ATR */
+.atr-display {
+  background: var(--bg-card);
+  border-radius: var(--radius-xl);
+  padding: 24px;
+  border: 1px solid var(--border);
+  margin-top: 16px;
+}
+.atr-container { display: flex; gap: 20px; margin-bottom: 16px; }
+.atr-item {
+  flex: 1;
+  padding: 16px;
+  border-radius: var(--radius-lg);
+  text-align: center;
+}
+.atr-item.stop-loss {
+  background: linear-gradient(135deg, #fef2f2, #fee2e2);
+  border: 1px solid #fecaca;
+}
+.atr-item.take-profit {
+  background: linear-gradient(135deg, #eff6ff, #dbeafe);
+  border: 1px solid #bfdbfe;
+}
+.atr-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.atr-value { font-size: 20px; font-weight: 700; color: var(--text-primary); }
+.atr-pct { font-size: 12px; color: var(--text-secondary); }
+.atr-support-resistance { display: flex; gap: 16px; }
+.atr-support, .atr-resistance {
+  flex: 1;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  text-align: center;
+}
+.atr-support { background: #eff6ff; border: 1px solid #bfdbfe; }
+.atr-resistance { background: #fef2f2; border: 1px solid #fecaca; }
+.atr-support .atr-label, .atr-resistance .atr-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.atr-support .atr-value, .atr-resistance .atr-value { font-size: 16px; font-weight: 600; }
+
+/* Order Distribution */
+.order-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.order-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 40px;
+}
+.dist-bar {
+  flex: 1;
+  height: 16px;
+  background: #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  border-radius: 8px;
+  transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.progress-bar-large .progress-fill { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+.progress-bar-medium .progress-fill { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.progress-bar-small .progress-fill { background: linear-gradient(90deg, #64748b, #94a3b8); }
+.dist-bar-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 40px;
+  text-align: right;
+}
+
+/* Chip Distribution */
+.chip-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.chip-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 60px;
+}
+.chip-bar-fill {
+  flex: 1;
+  height: 16px;
+  border-radius: 8px;
+  transition: width 0.8s ease;
+}
+#chipProfit { background: linear-gradient(90deg, #ef4444, #f87171); } /* 获利盘 = 红 */
+#chipTrapped { background: linear-gradient(90deg, #10b981, #34d399); } /* 套牢盘 = 绿 */
+.chip-bar-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 40px;
+  text-align: right;
+}
+
+/* ============================================================
+   PREDICTION
+   ============================================================ */
+.pred-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+.pred-metric {
+  background: var(--bg-tertiary);
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  text-align: center;
+  transition: all var(--transition-fast);
+}
+.pred-metric:hover {
+  background: #f1f5f9;
+  transform: translateY(-1px);
+}
+.pred-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.pred-value {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+/* ============================================================
+   ML DETAILS
+   ============================================================ */
+.ml-details {
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+}
+.ml-details h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 20px;
+}
+.ml-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+.ml-metric {
+  background: rgba(59, 130, 246, 0.04);
+  border: 1px solid rgba(59, 130, 246, 0.1);
+  border-radius: var(--radius-md);
+  padding: 14px;
+}
+.ml-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+.ml-value {
+  display: block;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.ml-value.bullish { color: var(--bull); }
+.ml-value.bearish { color: var(--bear); }
+.ml-value.neutral { color: var(--accent-yellow); }
+
+/* ML 概率条 */
+.ml-prob-bar {
+  display: flex;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  margin-bottom: 6px;
+  background: rgba(0,0,0,0.05);
+}
+.ml-prob-up {
+  background: linear-gradient(90deg, #3b82f6, #60a5fa);
+  transition: width 0.5s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: white;
+  font-weight: 600;
+}
+.ml-prob-neutral {
+  background: linear-gradient(90deg, #d29922, #e5b84b);
+  transition: width 0.5s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: white;
+  font-weight: 600;
+}
+.ml-prob-down {
+  background: linear-gradient(90deg, #f85149, #f88379);
+  transition: width 0.5s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: white;
+  font-weight: 600;
+}
+.ml-prob-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* ML 特征重要性 */
+.ml-features {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.ml-feature-item {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  background: rgba(59, 130, 246, 0.08);
+  color: var(--accent-blue);
+  font-weight: 500;
+}
+
+/* ============================================================
+   K-LINE SIGNALS
+   ============================================================ */
+.signal-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+.signal-column h4 {
+  font-size: 14px;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+.signal-list { display: flex; flex-direction: column; gap: 8px; }
+.signal-item {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.signal-item.bullish {
+  background: linear-gradient(135deg, #fef2f2, #fee2e2); /* 看涨 = 红 */
+  color: #dc2626;
+  border-left: 3px solid #ef4444;
+}
+.signal-item.bearish {
+  background: linear-gradient(135deg, #ecfdf5, #d1fae5); /* 看跌 = 绿 */
+  color: #059669;
+  border-left: 3px solid #10b981;
+}
+
+/* ============================================================
+   TREND & RSI
+   ============================================================ */
+.trend-rsi .trend-metric {
+  background: var(--bg-tertiary);
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  transition: all var(--transition-fast);
+}
+.trend-rsi .trend-metric:hover {
+  background: #f1f5f9;
+  transform: translateY(-1px);
+}
+.trend-metric .trend-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.trend-metric .trend-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* RSI Bar */
+.rsi-container {
+  width: 100%;
+  height: 8px;
+  background: #e2e8f0;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 4px 0;
+}
+.rsi-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease;
+  background: linear-gradient(90deg, #ef4444, #f59e0b, #10b981); /* 超买红→中性黄→超卖绿 */
+}
+.rsi-fill.high { background: linear-gradient(90deg, #ef4444, #f87171); } /* 超买 = 红 */
+.rsi-fill.low { background: linear-gradient(90deg, #10b981, #34d399); } /* 超卖 = 绿 */
+.rsi-fill.medium { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.rsi-value { font-size: 14px; font-weight: 600; }
+
+/* Score Circle */
+.score-circle {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: conic-gradient(#3b82f6 0deg, #3b82f6 calc(var(--score, 0) * 3.6deg), #e2e8f0 calc(var(--score, 0) * 3.6deg));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  margin: 0 auto;
+}
+.score-circle-inner {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);
+}
+.score-text { font-size: 18px; font-weight: 700; color: var(--text-primary); }
+
+/* ============================================================
+   REPORT CONTENT
+   ============================================================ */
+.report-content {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: 32px;
+  line-height: 1.8;
+  font-size: 14px;
+  color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
+}
+.report-content h1 {
+  font-size: 22px;
+  font-weight: 700;
+  color: #0f172a;
+  text-align: center;
+  margin: 24px 0 8px;
+  letter-spacing: 0.02em;
+}
+.report-content h2 {
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
+  margin: 24px 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid #e2e8f0;
+}
+.report-content h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #0f172a;
+  margin: 20px 0 10px;
+}
+.report-content h4 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #0f172a;
+  margin: 16px 0 8px;
+}
+.report-content p {
+  margin: 8px 0;
+  line-height: 1.7;
+}
+.report-content ul, .report-content ol {
+  margin: 8px 0;
+  padding-left: 24px;
+}
+.report-content li {
+  margin: 4px 0;
+  line-height: 1.6;
+}
+.report-content hr {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  margin: 16px 0;
+}
+.report-content strong { font-weight: 600; color: #0f172a; }
+.report-content .report-divider {
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  letter-spacing: 4px;
+  margin: 12px 0;
+}
+.report-content .report-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 13px;
+}
+.report-content .report-table th,
+.report-content .report-table td {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.report-content .report-table th {
+  background: var(--bg-tertiary);
+  font-weight: 600;
+}
+.report-content .report-highlight {
+  background: linear-gradient(135deg, #eff6ff, #dbeafe);
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 16px 0;
+}
+.report-content .report-emphasis {
+  color: var(--accent-dark);
+  font-weight: 600;
+}
+
+/* ============================================================
+   WEBSOCKET
+   ============================================================ */
+.websocket-content { padding: 16px; }
+.websocket-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+.websocket-data {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.ws-item {
+  padding: 16px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  transition: all var(--transition-fast);
+}
+.ws-item:hover {
+  background: #f1f5f9;
+  transform: translateY(-1px);
+}
+.ws-label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.ws-value { font-size: 16px; font-weight: 600; color: var(--text-primary); }
+
+/* ============================================================
+   HEATMAP
+   ============================================================ */
+.heatmap-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+}
+.heatmap-item {
+  padding: 16px;
+  border-radius: var(--radius-md);
+  text-align: center;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all var(--transition-normal);
+  cursor: pointer;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+}
+.heatmap-item:hover {
+  transform: scale(1.05);
+  box-shadow: var(--shadow-md);
+}
+.heatmap-item .heatmap-title {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.heatmap-item .heatmap-value {
+  font-size: 18px;
+  font-weight: 700;
+}
+.heatmap-item .heatmap-level {
+  font-size: 12px;
+  opacity: 0.8;
+  margin-top: 4px;
+}
+
+/* ============================================================
+   ALERTS
+   ============================================================ */
+.alert-list { display: flex; flex-direction: column; gap: 8px; }
+.alert-item {
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  background: var(--bg-tertiary);
+  border-left: 3px solid var(--accent);
+  transition: all var(--transition-fast);
+}
+.alert-item:hover {
+  background: #f1f5f9;
+}
+
+/* 告警严重度颜色 */
+.alert-item.high    { border-left-color: #ef4444; }
+.alert-item.medium  { border-left-color: #f59e0b; }
+.alert-item.low     { border-left-color: #3b82f6; }
+
+/* 告警历史项 */
+.alert-history-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  background: var(--bg-tertiary);
+  margin-bottom: 6px;
+}
+.alert-history-item.high   { border-left: 3px solid #ef4444; }
+.alert-history-item.medium { border-left: 3px solid #f59e0b; }
+.alert-history-item.low    { border-left: 3px solid #3b82f6; }
+
+/* 告警摘要 */
+.alert-summary-item {
+  text-align: center;
+  padding: 8px;
+}
+.alert-summary-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--accent);
+}
+.alert-summary-label {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 2px;
+}
+.alert-summary {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.alert-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+/* ============================================================
+   LOADING OVERLAY
+   ============================================================ */
+.loading-overlay {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  background: rgba(15, 23, 42, 0.7);
+  z-index: 9999;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.loading-overlay.active { display: flex; }
+.loading-overlay .spinner {
+  width: 48px; height: 48px;
+  border: 4px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #3b82f6;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+}
+.loading-overlay .loading-text {
+  color: #fff;
+  font-size: 14px;
+  margin-top: 16px;
+  font-weight: 500;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ============================================================
+   RESPONSIVE
+   ============================================================ */
+@media (max-width: 1024px) {
+  .overview-cards { grid-template-columns: repeat(2, 1fr); }
+  .flow-row-1 { grid-template-columns: repeat(2, 1fr); }
+  .flow-row-2 { grid-template-columns: repeat(3, 1fr); }
+  .pred-metrics { grid-template-columns: repeat(2, 1fr); }
+  .ml-metrics { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 768px) {
+  .container { padding: 0 16px; }
+  .overview-cards { grid-template-columns: repeat(2, 1fr); }
+  .stock-selector { flex-direction: column; }
+  .form-group { min-width: 100%; }
+  .nav { gap: 2px; }
+  .nav-link { padding: 8px 10px; font-size: 12px; }
+  .section-header h2 { font-size: 20px; }
+  .flow-row-1 { grid-template-columns: 1fr; }
+  .flow-row-2 { grid-template-columns: repeat(2, 1fr); }
+  .ml-metrics { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+  .overview-cards { grid-template-columns: 1fr; }
+  .pred-metrics { grid-template-columns: 1fr; }
+  .ml-metrics { grid-template-columns: 1fr; }
+}
+
+/* ============================================================
+   PULSE ANIMATION (for gauge)
+   ============================================================ */
+@keyframes pulse {
+  0%, 100% { filter: drop-shadow(0 0 8px rgba(239, 68, 68, 0.4)); } /* 买入 = 红 */
+  50% { filter: drop-shadow(0 0 16px rgba(239, 68, 68, 0.6)); }
+}
+@keyframes pulseSell {
+  0%, 100% { filter: drop-shadow(0 0 8px rgba(16, 185, 129, 0.4)); } /* 卖出 = 绿 */
+  50% { filter: drop-shadow(0 0 16px rgba(16, 185, 129, 0.6)); }
+}
+.gauge-active.buy { animation: pulse 2s ease-in-out infinite; }
+.gauge-active.sell { animation: pulseSell 2s ease-in-out infinite; }
+
+/* ============================================================
+   UTILITY CLASSES
+   ============================================================ */
+.text-secondary { color: var(--text-secondary); }
+.text-center { text-align: center; }
+.card-header { margin-bottom: 16px; }
+.card-header h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card-body { }
+
+/* ============================================================
+   BACKTEST REPORT STYLES
+   ============================================================ */
+.backtest-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+.backtest-grid .card:first-child {
+  grid-column: 1 / -1;
+}
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+.stat-item {
+  text-align: center;
+  padding: 12px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 8px;
+}
+.stat-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.stat-value {
+  display: block;
+  font-size: 20px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+}
+.stat-value.positive { color: #ef4444; } /* 涨 = 红 */
+.stat-value.negative { color: #10b981; } /* 跌 = 绿 */
+
+/* Walk-Forward Windows */
+.wf-window {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  margin: 4px 0;
+  background: rgba(255,255,255,0.03);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.wf-label {
+  font-weight: 600;
+  color: #8b5cf6;
+  min-width: 50px;
+}
+.wf-metric {
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+}
+
+/* Monte Carlo */
+.mc-stats {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.mc-stat {
+  text-align: center;
+  padding: 8px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 6px;
+}
+.mc-label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.mc-value {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+}
+.mc-histogram {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 80px;
+  padding: 8px 0;
+}
+.mc-bar {
+  flex: 1;
+  min-width: 4px;
+  max-width: 20px;
+  background: linear-gradient(to top, #3b82f6, #8b5cf6);
+  border-radius: 2px 2px 0 0;
+  position: relative;
+  transition: height 0.3s;
+}
+.mc-bar-label {
+  display: none;
+  position: absolute;
+  bottom: -16px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 8px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* ============================================================
+   PORTFOLIO OPTIMIZATION STYLES
+   ============================================================ */
+.portfolio-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+.portfolio-grid .card:first-child {
+  grid-column: 1 / -1;
+}
+.bl-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+.bl-name {
+  min-width: 80px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.bl-bar-bg {
+  flex: 1;
+  height: 16px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+.bl-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+.bl-bar-pos {
+  background: #3b82f6;
+}
+.bl-bar-neg {
+  background: #ef4444;
+}
+.bl-value {
+  min-width: 50px;
+  text-align: right;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+}
+.weight-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.weight-table th, .weight-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+.weight-table th {
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 12px;
+}
+.weight-table td {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ============================================================
+   FACTOR ANALYSIS STYLES
+   ============================================================ */
+.factors-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+.factor-rating {
+  text-align: center;
+  padding: 20px;
+}
+.rating-display {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+.rating-badge {
+  display: inline-block;
+  padding: 12px 32px;
+  border-radius: 12px;
+  font-size: 24px;
+  font-weight: 700;
+  color: white;
+}
+.rating-detail {
+  text-align: left;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+.rating-detail p {
+  margin: 4px 0;
+}
+.rating-detail strong {
+  color: var(--text-primary);
+}
+
+/* Responsive */
+@media (max-width: 1024px) {
+  .backtest-grid,
+  .portfolio-grid,
+  .factors-grid {
+    grid-template-columns: 1fr;
+  }
+  .stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .mc-stats {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+/* Chinese Summary */
+.chinese-summary {
+  padding: 4px 0;
+}
+.summary-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  margin: 6px 0;
+  background: rgba(255,255,255,0.03);
+  border-radius: 8px;
+  border-left: 3px solid #3b82f6;
+}
+.summary-item.positive { border-left-color: #ef4444; } /* 涨 = 红 */
+.summary-item.negative { border-left-color: #10b981; } /* 跌 = 绿 */
+.summary-item.neutral { border-left-color: #f59e0b; }
+.summary-icon {
+  font-size: 16px;
+  margin-top: 2px;
+}
+.summary-text {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+.summary-label {
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+.summary-details {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+.summary-detail-item {
+  text-align: center;
+}
+.summary-detail-value {
+  display: block;
+  font-size: 18px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-primary);
+}
+.summary-detail-label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* ═══════════════════════════════════════════════════
+   量化模型面板样式 (Dashboard P0-P3) — 高对比度优化版
+   ═══════════════════════════════════════════════════ */
+
+/* ---- 网格布局 ---- */
+.quant-model-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(520px, 1fr));
+    gap: 20px;
+    margin-top: 16px;
+}
+
+/* ---- 面板容器 ---- */
+.qm-panel {
+    background: rgba(15, 23, 42, 0.85);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(59, 130, 246, 0.25);
+    border-radius: 14px;
+    padding: 22px;
+    transition: border-color 0.3s, box-shadow 0.3s;
+}
+
+.qm-panel:hover {
+    border-color: rgba(59, 130, 246, 0.45);
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.08);
+}
+
+/* 面板内标题 */
+.qm-panel h3 {
+    font-size: 17px;
+    font-weight: 700;
+    color: #e2e8f0;
+    margin: 0 0 18px 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.qm-panel h3 i {
+    color: #60a5fa;
+    font-size: 18px;
+}
+
+/* JS 生成的 .dashboard-card 样式 */
+.dashboard-card h3 {
+    font-size: 17px;
+    font-weight: 700;
+    color: #e2e8f0;
+    margin: 0 0 16px 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.dashboard-card h3 i {
+    color: #60a5fa;
+    font-size: 18px;
+}
+
+.dashboard-card h4 {
+    font-size: 14px;
+    color: #cbd5e1;
+    margin: 14px 0 10px;
+    font-weight: 700;
+}
+
+.qm-content {
+    min-height: 120px;
+}
+
+/* ---- 加载/错误状态 ---- */
+.qm-content .loading {
+    text-align: center;
+    padding: 48px 20px;
+    color: #94a3b8;
+    font-size: 15px;
+}
+
+.qm-content .loading i {
+    font-size: 28px;
+    margin-bottom: 10px;
+    display: block;
+    animation: spin 1s linear infinite;
+    color: #60a5fa;
+}
+
+.qm-content .error {
+    text-align: center;
+    padding: 24px;
+    color: #f87171;
+    font-size: 14px;
+}
+
+.qm-content .error i {
+    font-size: 24px;
+    margin-bottom: 8px;
+    display: block;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* ---- 因子表格 ---- */
+.factor-table table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+
+.factor-table th {
+    text-align: left;
+    padding: 10px 14px;
+    background: rgba(59, 130, 246, 0.15);
+    color: #bfdbfe;
+    font-weight: 700;
+    font-size: 13px;
+    border-bottom: 2px solid rgba(59, 130, 246, 0.3);
+}
+
+.factor-table td {
+    padding: 8px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    color: #e2e8f0;
+    font-size: 14px;
+}
+
+.factor-table tr:hover td {
+    background: rgba(59, 130, 246, 0.08);
+}
+
+.factor-bar {
+    background: #0f172a !important;
+    border-radius: 4px;
+    height: 22px;
+    overflow: hidden;
+}
+
+/* ---- 指标卡片 ---- */
+.metric-cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    margin-top: 18px;
+}
+
+.metric-card {
+    background: rgba(30, 41, 59, 0.7);
+    border: 1px solid rgba(59, 130, 246, 0.15);
+    border-radius: 10px;
+    padding: 16px 12px;
+    text-align: center;
+}
+
+.metric-label {
+    font-size: 12px;
+    color: #cbd5e1;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+    font-weight: 600;
+}
+
+.metric-value {
+    font-size: 22px;
+    font-weight: 800;
+    font-family: 'JetBrains Mono', monospace;
+    color: #60a5fa;
+}
+
+/* ---- 预测摘要 ---- */
+.prediction-summary {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    margin-bottom: 18px;
+}
+
+.direction-badge {
+    padding: 10px 18px;
+    border-radius: 10px;
+    font-size: 17px;
+    font-weight: 800;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+}
+
+.confidence-meter {
+    flex: 1;
+}
+
+.confidence-label {
+    font-size: 13px;
+    color: #cbd5e1;
+    margin-bottom: 6px;
+    font-weight: 600;
+}
+
+.confidence-bar-bg {
+    background: rgba(15, 23, 42, 0.9);
+    border-radius: 6px;
+    height: 26px;
+    overflow: hidden;
+}
+
+.confidence-bar-fill {
+    height: 100%;
+    border-radius: 6px;
+    transition: width 0.5s ease;
+}
+
+.confidence-value {
+    text-align: right;
+    font-size: 15px;
+    font-weight: 800;
+    font-family: 'JetBrains Mono', monospace;
+    margin-top: 4px;
+    color: #e2e8f0;
+}
+
+/* ---- 概率分布 ---- */
+.probabilities-chart h4 {
+    font-size: 14px;
+    color: #cbd5e1;
+    margin: 14px 0 10px;
+    font-weight: 700;
+}
+
+.prob-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+    font-size: 14px;
+}
+
+.prob-bar span:first-child {
+    width: 44px;
+    color: #cbd5e1;
+    font-weight: 600;
+}
+
+.prob-bar span:last-child {
+    width: 54px;
+    text-align: right;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    color: #e2e8f0;
+}
+
+.prob-fill {
+    flex: 1;
+    height: 22px;
+    border-radius: 5px;
+    transition: width 0.5s;
+}
+
+.prob-fill.up { background: linear-gradient(90deg, #ef4444, #f87171); } /* 上涨 = 红 */
+.prob-fill.neutral { background: linear-gradient(90deg, #6b7280, #9ca3af); }
+.prob-fill.down { background: linear-gradient(90deg, #10b981, #34d399); } /* 下跌 = 绿 */
+
+/* ---- IC 排名表格 ---- */
+.ic-ranking-table table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+
+.ic-ranking-table th {
+    text-align: left;
+    padding: 10px 12px;
+    background: rgba(59, 130, 246, 0.15);
+    color: #bfdbfe;
+    font-weight: 700;
+    font-size: 13px;
+    border-bottom: 2px solid rgba(59, 130, 246, 0.3);
+}
+
+.ic-ranking-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    color: #e2e8f0;
+}
+
+/* ---- 特征重要性 ---- */
+.feature-importance h4,
+.importance-bars h4 {
+    font-size: 14px;
+    color: #cbd5e1;
+    margin: 14px 0 10px;
+    font-weight: 700;
+}
+
+.importance-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+    font-size: 13px;
+}
+
+.importance-bar span:first-child {
+    width: 150px;
+    color: #cbd5e1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
+}
+
+.importance-bar span:last-child {
+    width: 64px;
+    text-align: right;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    color: #e2e8f0;
+}
+
+.imp-bar-bg {
+    flex: 1;
+    background: rgba(15, 23, 42, 0.9);
+    border-radius: 4px;
+    height: 16px;
+    overflow: hidden;
+}
+
+.imp-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #3b82f6, #60a5fa);
+    border-radius: 4px;
+    transition: width 0.5s;
+}
+
+/* ---- 风险分解 ---- */
+.risk-decomposition h4 {
+    font-size: 14px;
+    color: #cbd5e1;
+    margin: 14px 0 10px;
+    font-weight: 700;
+}
+
+.weight-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+    font-size: 13px;
+}
+
+.weight-bar span:first-child {
+    width: 64px;
+    color: #cbd5e1;
+    font-weight: 500;
+}
+
+.weight-bar span:last-child {
+    width: 54px;
+    text-align: right;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    color: #e2e8f0;
+}
+
+.w-bar-bg {
+    flex: 1;
+    background: rgba(15, 23, 42, 0.9);
+    border-radius: 4px;
+    height: 16px;
+    overflow: hidden;
+}
+
+.w-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #3b82f6, #60a5fa);
+    border-radius: 4px;
+}
+
+/* ---- 情感分析 ---- */
+.sentiment-display {
+    text-align: center;
+    padding: 24px;
+}
+
+/* ---- 健康状态 ---- */
+.health-status {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 18px;
+    border-radius: 10px;
+    border-left: 4px solid;
+    font-size: 14px;
+    color: #e2e8f0;
+}
+
+/* ---- 响应式 ---- */
+@media (max-width: 1200px) {
+    .quant-model-grid { grid-template-columns: 1fr; }
+    .metric-cards { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ---- 数据质量指示器 ---- */
+.data-quality-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    background: rgba(30, 41, 59, 0.7);
+    border: 1px solid rgba(59, 130, 246, 0.15);
+    border-radius: 10px;
+    margin-bottom: 14px;
+}
+
+.dq-indicator {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.dq-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.dq-dot.real { background: #10b981; box-shadow: 0 0 6px rgba(16, 185, 129, 0.5); }
+.dq-dot.fake { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, 0.5); }
+.dq-dot.partial { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, 0.5); }
+.dq-dot.info { background: #3b82f6; box-shadow: 0 0 6px rgba(59, 130, 246, 0.5); }
+
+.dq-label { color: #94a3b8; }
+.dq-value { color: #e2e8f0; font-family: 'JetBrains Mono', monospace; font-weight: 700; }
+
+/* ---- 模型状态徽章 ---- */
+.model-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.model-status-badge.trained {
+    background: rgba(16, 185, 129, 0.15);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.model-status-badge.untrained {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.model-status-badge.updating {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+/* ---- 模型信息行 ---- */
+.model-info-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background: rgba(30, 41, 59, 0.5);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    font-size: 13px;
+}
+
+.model-info-row .info-label {
+    color: #94a3b8;
+    font-weight: 500;
+}
+
+.model-info-row .info-value {
+    color: #e2e8f0;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+}
+
+/* ---- 约束标签 ---- */
+.constraint-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    background: rgba(139, 92, 246, 0.15);
+    color: #a78bfa;
+    border: 1px solid rgba(139, 92, 246, 0.25);
+    margin: 2px 4px 2px 0;
+}
+
+.constraint-tag.enforced {
+    background: rgba(16, 185, 129, 0.15);
+    color: #34d399;
+    border-color: rgba(16, 185, 129, 0.25);
+}
+
+.constraint-tag.warning {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border-color: rgba(245, 158, 11, 0.25);
+}
+
+/* ---- IC 衰减图表 ---- */
+.ic-decay-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    height: 80px;
+    padding: 10px 0;
+    margin: 10px 0;
+}
+
+.ic-decay-bar {
+    flex: 1;
+    min-width: 8px;
+    max-width: 24px;
+    border-radius: 3px 3px 0 0;
+    transition: height 0.4s ease;
+    position: relative;
+}
+
+.ic-decay-bar.positive { background: linear-gradient(to top, #3b82f6, #60a5fa); }
+.ic-decay-bar.negative { background: linear-gradient(to top, #ef4444, #f87171); }
+
+.ic-decay-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: #64748b;
+    margin-top: 4px;
+}
+
+/* ---- 风险指标增强 ---- */
+.risk-metric-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background: rgba(30, 41, 59, 0.5);
+    border-radius: 8px;
+    margin-bottom: 6px;
+}
+
+.risk-metric-row .rm-label {
+    color: #94a3b8;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.risk-metric-row .rm-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    font-weight: 700;
+    color: #e2e8f0;
+}
+
+.risk-metric-row .rm-value.positive { color: #34d399; }
+.risk-metric-row .rm-value.negative { color: #f87171; }
+.risk-metric-row .rm-value.warning { color: #fbbf24; }
+
+/* ---- 因子质量指标 ---- */
+.factor-quality-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+    margin-top: 12px;
+}
+
+.fq-card {
+    background: rgba(30, 41, 59, 0.7);
+    border: 1px solid rgba(59, 130, 246, 0.12);
+    border-radius: 10px;
+    padding: 14px;
+    text-align: center;
+}
+
+.fq-card .fq-label {
+    font-size: 11px;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+    font-weight: 600;
+}
+
+.fq-card .fq-value {
+    font-size: 20px;
+    font-weight: 800;
+    font-family: 'JetBrains Mono', monospace;
+    color: #60a5fa;
+}
+
+.fq-card .fq-desc {
+    font-size: 11px;
+    color: #64748b;
+    margin-top: 4px;
+}
+
+/* ---- 响应式 ---- */
+@media (max-width: 768px) {
+    .metric-cards { grid-template-columns: 1fr; }
+    .qm-panel { padding: 16px; }
+    .factor-quality-grid { grid-template-columns: 1fr; }
+}
+
+/* ============================================================
+   深度学习 V2 面板样式 (Transformer-LSTM + RL + FinBERT)
+   ============================================================ */
+
+.dl-v2-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+    padding: 16px;
+}
+
+.dl-card {
+    background: rgba(30, 41, 59, 0.8);
+    border: 1px solid rgba(59, 130, 246, 0.2);
+    border-radius: 12px;
+    overflow: hidden;
+    backdrop-filter: blur(10px);
+}
+
+.dl-card-header {
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.2), rgba(37, 99, 235, 0.1));
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(59, 130, 246, 0.15);
+    font-weight: 600;
+    color: #93c5fd;
+    font-size: 14px;
+}
+
+.dl-card-header i {
+    margin-right: 8px;
+    color: #60a5fa;
+}
+
+.dl-card-body {
+    padding: 16px;
+}
+
+/* 预测主展示 */
+.dl-prediction-main {
+    padding: 20px;
+    border-radius: 10px;
+    text-align: center;
+    margin-bottom: 16px;
+}
+
+.dl-prediction-main.bullish {
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.2), rgba(37, 99, 235, 0.15));
+    border: 2px solid #3b82f6;
+}
+
+.dl-prediction-main.bearish {
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(5, 150, 105, 0.15));
+    border: 2px solid #10b981;
+}
+
+.dl-prediction-main.neutral {
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(217, 119, 6, 0.15));
+    border: 2px solid #f59e0b;
+}
+
+.dl-direction {
+    font-size: 28px;
+    font-weight: 800;
+    margin-bottom: 8px;
+}
+
+.dl-prediction-main.bullish .dl-direction { color: #60a5fa; }
+.dl-prediction-main.bearish .dl-direction { color: #34d399; }
+.dl-prediction-main.neutral .dl-direction { color: #fbbf24; }
+
+.dl-confidence {
+    font-size: 14px;
+    color: #94a3b8;
+}
+
+/* 概率条 */
+.dl-prob-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.dl-prob-row {
+    display: grid;
+    grid-template-columns: 60px 1fr 50px;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+}
+
+.dl-prob-fill {
+    height: 24px;
+    border-radius: 4px;
+    background: linear-gradient(90deg, #3b82f6, #60a5fa);
+    min-width: 4px;
+    transition: width 0.3s ease;
+}
+
+.dl-prob-fill.neutral {
+    background: linear-gradient(90deg, #f59e0b, #fbbf24);
+}
+
+.dl-prob-fill.bearish {
+    background: linear-gradient(90deg, #10b981, #34d399);
+}
+
+/* RL 状态 */
+.dl-rl-status {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 12px;
+    border-radius: 8px;
+    margin-bottom: 12px;
+    font-weight: 600;
+}
+
+.dl-rl-status.trained {
+    background: rgba(16, 185, 129, 0.15);
+    color: #34d399;
+}
+
+.dl-rl-status.untrained {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+}
+
+.dl-status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    animation: pulse 2s infinite;
+}
+
+.dl-rl-status.trained .dl-status-dot {
+    background: #10b981;
+    box-shadow: 0 0 10px #10b981;
+}
+
+.dl-rl-status.untrained .dl-status-dot {
+    background: #f59e0b;
+    box-shadow: 0 0 10px #f59e0b;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+.dl-rl-info {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.dl-info-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: rgba(15, 23, 42, 0.5);
+    border-radius: 6px;
+    font-size: 13px;
+}
+
+.dl-info-row span:first-child {
+    color: #94a3b8;
+}
+
+.dl-info-row span:last-child {
+    color: #e2e8f0;
+    font-weight: 500;
+}
+
+/* 情感分析 */
+.dl-sentiment-main {
+    padding: 20px;
+    border-radius: 10px;
+    text-align: center;
+    margin-bottom: 16px;
+}
+
+.dl-sentiment-main.positive {
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(5, 150, 105, 0.15));
+    border: 2px solid #10b981;
+}
+
+.dl-sentiment-main.negative {
+    background: linear-gradient(135deg, rgba(239, 68, 68, 0.2), rgba(220, 38, 38, 0.15));
+    border: 2px solid #ef4444;
+}
+
+.dl-sentiment-main.neutral {
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(217, 119, 6, 0.15));
+    border: 2px solid #f59e0b;
+}
+
+.dl-sentiment-score {
+    font-size: 36px;
+    font-weight: 900;
+    font-family: 'JetBrains Mono', monospace;
+    margin-bottom: 4px;
+}
+
+.dl-sentiment-main.positive .dl-sentiment-score { color: #34d399; }
+.dl-sentiment-main.negative .dl-sentiment-score { color: #f87171; }
+.dl-sentiment-main.neutral .dl-sentiment-score { color: #fbbf24; }
+
+.dl-sentiment-label {
+    font-size: 14px;
+    color: #94a3b8;
+}
+
+.dl-sentiment-breakdown {
+    display: flex;
+    justify-content: space-around;
+    gap: 12px;
+}
+
+.dl-sb-item {
+    text-align: center;
+    flex: 1;
+}
+
+.dl-sb-value {
+    font-size: 18px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    margin-bottom: 4px;
+}
+
+.dl-sb-label {
+    font-size: 11px;
+    color: #64748b;
+}
+
+/* 模型架构 */
+.dl-architecture {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+}
+
+.dl-arch-layer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    background: rgba(15, 23, 42, 0.6);
+    border-radius: 8px;
+    width: 100%;
+    box-sizing: border-box;
+    font-size: 13px;
+}
+
+.dl-arch-icon {
+    font-size: 16px;
+}
+
+.dl-arch-detail {
+    margin-left: auto;
+    font-size: 11px;
+    color: #64748b;
+}
+
+.dl-arch-arrow {
+    color: #60a5fa;
+    font-size: 18px;
+}
+
+.dl-arch-output {
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.2), rgba(37, 99, 235, 0.15));
+    border: 1px solid #3b82f6;
+    font-weight: 600;
+    color: #93c5fd;
+}
+
+/* 无数据/错误 */
+.dl-no-data {
+    text-align: center;
+    color: #64748b;
+    padding: 20px;
+    font-size: 13px;
+}
+
+.dl-error {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid #ef4444;
+    border-radius: 8px;
+    padding: 16px;
+    text-align: center;
+    color: #f87171;
+}
+
+/* 响应式 */
+@media (max-width: 1024px) {
+    .dl-v2-grid {
+        grid-template-columns: 1fr;
+    }
+}

@@ -1,0 +1,70 @@
+# Claude Code local config
+CLAUDE.local.md
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+/tmp/*
+
+# Backups
+backup_*
+backup_*/
+
+# Data and Models
+data/
+models/
+dl_models/
+*.csv
+*.xlsx
+*.xls
+*.db
+*.sqlite
+*.sqlite3
+
+# Frontend Cache
+static/js/*.bak
+static/js/*.bak2
+static/css/*.bak
+templates/*.bak
+templates/*.bak.*
+
+# Environment Variables
+.env
+.env.local
+config.local.json
+
+# Research
+research/*.pyc
+research/__pycache__/
+
+# Backtest Results
+backtest_results/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Temporary Files
+*.tmp
+temp/
+tmp/

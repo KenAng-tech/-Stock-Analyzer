@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SOTA 量化模型仪表盘 - Stock Analyzer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0e27; color: #e0e6ed; }
+        
+        .header { background: linear-gradient(135deg, #1a1f3a, #0a0e27); padding: 20px 30px; border-bottom: 1px solid #2a3050; }
+        .header h1 { font-size: 24px; color: #00d4ff; }
+        .header p { color: #8892b0; margin-top: 5px; }
+        
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+        
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; margin-bottom: 20px; }
+        .card { background: #111638; border: 1px solid #2a3050; border-radius: 12px; padding: 20px; }
+        .card h3 { color: #00d4ff; margin-bottom: 15px; font-size: 16px; }
+        
+        .stat-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #1a1f3a; }
+        .stat-label { color: #8892b0; }
+        .stat-value { color: #e0e6ed; font-weight: 600; }
+        .stat-value.bullish { color: #00ff88; }
+        .stat-value.bearish { color: #ff4757; }
+        .stat-value.neutral { color: #ffa502; }
+        
+        .full-width { grid-column: 1 / -1; }
+        
+        .agent-flow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 15px 0; }
+        .agent-node { background: #1a1f3a; border: 1px solid #00d4ff; border-radius: 8px; padding: 8px 15px; text-align: center; }
+        .agent-node h4 { font-size: 12px; color: #00d4ff; }
+        .agent-node p { font-size: 11px; color: #8892b0; }
+        .arrow { color: #00d4ff; font-size: 18px; }
+        
+        .factor-list { max-height: 200px; overflow-y: auto; }
+        .factor-item { display: flex; justify-content: space-between; padding: 6px 0; }
+        .factor-name { color: #8892b0; }
+        .factor-value { font-weight: 600; }
+        
+        .cross-modal-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+        .modal-item { background: #1a1f3a; border-radius: 8px; padding: 12px; text-align: center; }
+        .modal-item h4 { font-size: 12px; color: #00d4ff; margin-bottom: 5px; }
+        .modal-item p { font-size: 11px; color: #8892b0; }
+        .modal-score { font-size: 24px; font-weight: 700; color: #00ff88; }
+        
+        .ensemble-bar { height: 24px; background: #1a1f3a; border-radius: 12px; overflow: hidden; position: relative; }
+        .ensemble-fill { height: 100%; border-radius: 12px; transition: width 0.5s ease; }
+        .ensemble-label { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 12px; font-weight: 600; }
+        
+        .btn { background: #00d4ff; color: #0a0e27; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; }
+        .btn:hover { background: #00b8d4; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        .model-badge { display: inline-block; background: #1a1f3a; border: 1px solid #2a3050; border-radius: 4px; padding: 2px 8px; font-size: 11px; margin-right: 5px; }
+        
+        .loading { text-align: center; padding: 40px; color: #8892b0; }
+        
+        .sota-refs { margin-top: 15px; padding-top: 15px; border-top: 1px solid #2a3050; }
+        .sota-refs h4 { font-size: 12px; color: #8892b0; margin-bottom: 8px; }
+        .sota-ref-item { font-size: 11px; color: #6a7090; padding: 2px 0; }
+        
+        .status-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+        .status-active { background: #00ff88; }
+        .status-inactive { background: #ff4757; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>⚡ SOTA 量化模型仪表盘</h1>
+        <p>TradingAgents + AlphaCrafter + FCMR + Trading-R1 集成架构</p>
+    </div>
+    
+    <div class="container">
+        <!-- 模型状态 -->
+        <div class="card full-width" style="margin-bottom: 20px;">
+            <h3>📊 模型架构状态</h3>
+            <div class="agent-flow">
+                <div class="agent-node">
+                    <h4>LLM Multi-Agent</h4>
+                    <p>TradingAgents</p>
+                </div>
+                <span class="arrow">→</span>
+                <div class="agent-node">
+                    <h4>Factor Mining</h4>
+                    <p>AlphaCrafter</p>
+                </div>
+                <span class="arrow">→</span>
+                <div class="agent-node">
+                    <h4>Multi-Modal</h4>
+                    <p>FCMR</p>
+                </div>
+                <span class="arrow">→</span>
+                <div class="agent-node">
+                    <h4>RL Execution</h4>
+                    <p>Trading-R1</p>
+                </div>
+                <span class="arrow">→</span>
+                <div class="agent-node">
+                    <h4>Ensemble</h4>
+                    <p>Decision Layer</p>
+                </div>
+            </div>
+            <div id="modelStatus" style="margin-top: 15px;"></div>
+        </div>
+        
+        <!-- 决策结果 -->
+        <div class="grid">
+            <!-- LLM 决策 -->
+            <div class="card">
+                <h3>🤖 LLM Multi-Agent 决策</h3>
+                <div id="llmDecision">
+                    <div class="loading">加载中...</div>
+                </div>
+            </div>
+            
+            <!-- 因子挖掘 -->
+            <div class="card">
+                <h3>🔬 Factor Mining (AlphaCrafter)</h3>
+                <div id="factorMining">
+                    <div class="loading">加载中...</div>
+                </div>
+            </div>
+            
+            <!-- 跨模态推理 -->
+            <div class="card">
+                <h3>🌐 Cross-Modal Reasoning (FCMR)</h3>
+                <div id="crossModal">
+                    <div class="loading">加载中...</div>
+                </div>
+            </div>
+            
+            <!-- RL 执行 -->
+            <div class="card">
+                <h3>🎯 RL Execution (Trading-R1)</h3>
+                <div id="rlExecution">
+                    <div class="loading">加载中...</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 集成决策 -->
+        <div class="card full-width">
+            <h3>📈 集成决策 (Ensemble)</h3>
+            <div id="ensembleDecision">
+                <div class="loading">加载中...</div>
+            </div>
+        </div>
+        
+        <!-- 控制按钮 -->
+        <div style="text-align: center; margin: 30px 0;">
+            <button class="btn" id="refreshBtn" onclick="refreshAll()">🔄 刷新所有数据</button>
+            <button class="btn" id="sotaBtn" onclick="runSOTADecision()" style="margin-left: 10px;">⚡ 运行 SOTA 决策</button>
+        </div>
+        
+        <!-- SOTA 参考文献 -->
+        <div class="card full-width sota-refs">
+            <h4>📚 SOTA 参考文献</h4>
+            <div class="sota-ref-item">🔹 TradingAgents v0.2.5 (Tauric Research, 2026-05) - 44,000+ Stars</div>
+            <div class="sota-ref-item">🔹 AlphaCrafter (NJU, 2026-05) - Full-Stack Multi-Agent Framework</div>
+            <div class="sota-ref-item">🔹 QuantAgent (SBU, 2025-09) - Price-Driven HFT</div>
+            <div class="sota-ref-item">🔹 Trading-R1 (UCLA, UW, Stanford, ICLR 2026) - RL Trading</div>
+            <div class="sota-ref-item">🔹 FCMR (Hanyang University, ACL 2025) - Cross-Modal Reasoning</div>
+            <div class="sota-ref-item">🔹 QuantaAlpha (SUFE, 2026-02) - LLM Factor Mining</div>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = '/api';
+        let currentStock = 'sz300620';
+        
+        async function fetchJSON(url) {
+            try {
+                const response = await fetch(API_BASE + url);
+                return await response.json();
+            } catch (error) {
+                console.error(`Fetch error for ${url}:`, error);
+                return null;
+            }
+        }
+        
+        function getDirectionClass(direction) {
+            if (!direction) return 'neutral';
+            const d = direction.toLowerCase();
+            if (d.includes('bull')) return 'bullish';
+            if (d.includes('bear')) return 'bearish';
+            return 'neutral';
+        }
+        
+        function renderLLMDecision(data) {
+            if (!data) return '<div class="loading">数据不可用</div>';
+            
+            const consensus = data.analyst_consensus || 'neutral';
+            const research = data.research_direction || 'neutral';
+            const trade = data.trade_action || 'hold';
+            
+            return `
+                <div class="stat-row">
+                    <span class="stat-label">分析师共识</span>
+                    <span class="stat-value ${getDirectionClass(consensus)}">${consensus}</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">研究方向</span>
+                    <span class="stat-value ${getDirectionClass(research)}">${research}</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">交易动作</span>
+                    <span class="stat-value">${trade}</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">推荐操作</span>
+                    <span class="stat-value">${data.research_recommendation || 'hold'}</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">交易置信度</span>
+                    <span class="stat-value">${(data.trade_confidence * 100).toFixed(1)}%</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">风险等级</span>
+                    <span class="stat-value">${data.risk_level || 'medium'}</span>
+                </div>
+            `;
+        }
+        
+        function renderFactorMining(data) {
+            if (!data || !data.new_factors || data.new_factors.length === 0) {
+                return '<div class="loading">因子挖掘中...</div>';
+            }
+            
+            let html = '<div class="factor-list">';
+            data.new_factors.forEach(f => {
+                html += `
+                    <div class="factor-item">
+                        <span class="factor-name">${f.name}</span>
+                        <span class="factor-value">${(f.efficacy * 100).toFixed(1)}%</span>
+                    </div>
+                `;
+            });
+            html += '</div>';
+            return html;
+        }
+        
+        function renderCrossModal(data) {
+            if (!data) return '<div class="loading">推理中...</div>';
+            
+            return `
+                <div class="cross-modal-grid">
+                    <div class="modal-item">
+                        <h4>文本模态</h4>
+                        <div class="modal-score">${(data.modality_weights?.text * 100 || 33).toFixed(0)}%</div>
+                        <p>权重</p>
+                    </div>
+                    <div class="modal-item">
+                        <h4>视觉模态</h4>
+                        <div class="modal-score">${(data.modality_weights?.visual * 100 || 33).toFixed(0)}%</div>
+                        <p>权重</p>
+                    </div>
+                    <div class="modal-item">
+                        <h4>数值模态</h4>
+                        <div class="modal-score">${(data.modality_weights?.numerical * 100 || 34).toFixed(0)}%</div>
+                        <p>权重</p>
+                    </div>
+                </div>
+                <div class="stat-row" style="margin-top: 15px;">
+                    <span class="stat-label">模态一致性</span>
+                    <span class="stat-value">${(data.consistency_score * 100).toFixed(1)}%</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">跨模态推理</span>
+                    <span class="stat-value ${getDirectionClass(data.final_direction)}">${data.final_direction}</span>
+                </div>
+            `;
+        }
+        
+        function renderRLExecution(data) {
+            if (!data) return '<div class="loading">RL 执行中...</div>';
+            
+            return `
+                <div class="stat-row">
+                    <span class="stat-label">RL 动作</span>
+                    <span class="stat-value">${data.rl_action}</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">RL 置信度</span>
+                    <span class="stat-value">${(data.rl_confidence * 100).toFixed(1)}%</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">仓位大小</span>
+                    <span class="stat-value">${(data.rl_position_size * 100).toFixed(1)}%</span>
+                </div>
+            `;
+        }
+        
+        function renderEnsemble(data) {
+            if (!data) return '<div class="loading">集成计算中...</div>';
+            
+            const score = data.ensemble_score * 100;
+            const direction = data.ensemble_direction;
+            const barColor = direction === 'bullish' ? '#00ff88' : direction === 'bearish' ? '#ff4757' : '#ffa502';
+            
+            return `
+                <div style="margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span>集成得分</span>
+                        <span style="font-weight: 700; color: ${barColor};">${score.toFixed(1)}%</span>
+                    </div>
+                    <div class="ensemble-bar">
+                        <div class="ensemble-fill" style="width: ${score}%; background: ${barColor};"></div>
+                        <div class="ensemble-label">${direction.toUpperCase()}</div>
+                    </div>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">集成方向</span>
+                    <span class="stat-value ${getDirectionClass(direction)}">${direction}</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">执行时间</span>
+                    <span class="stat-value">${data.execution_time_ms?.toFixed(0) || 0}ms</span>
+                </div>
+            `;
+        }
+        
+        function renderModelStatus(status) {
+            if (!status) return '';
+            
+            let html = '<div style="display: flex; gap: 15px; flex-wrap: wrap;">';
+            for (const [key, value] of Object.entries(status)) {
+                const isActive = value === 'initialized';
+                html += `
+                    <div style="display: flex; align-items: center;">
+                        <span class="status-indicator ${isActive ? 'status-active' : 'status-inactive'}"></span>
+                        <span style="font-size: 12px;">${key}: ${value}</span>
+                    </div>
+                `;
+            }
+            html += '</div>';
+            return html;
+        }
+        
+        async function refreshAll() {
+            // 获取 LLM 决策
+            const llmData = await fetchJSON('/sota/decision');
+            const llmEl = document.getElementById('llmDecision');
+            if (llmEl && llmData) llmEl.innerHTML = renderLLMDecision(llmData);
+            
+            // 获取因子挖掘
+            const factorData = await fetchJSON('/sota/factors');
+            const factorEl = document.getElementById('factorMining');
+            if (factorEl && factorData) factorEl.innerHTML = renderFactorMining(factorData);
+            
+            // 获取跨模态
+            const crossModalData = await fetchJSON('/sota/cross-modal');
+            const crossModalEl = document.getElementById('crossModal');
+            if (crossModalEl && crossModalData) crossModalEl.innerHTML = renderCrossModal(crossModalData);
+            
+            // 获取 RL 执行
+            const rlData = await fetchJSON('/sota/rl');
+            const rlEl = document.getElementById('rlExecution');
+            if (rlEl && rlData) rlEl.innerHTML = renderRLExecution(rlData);
+            
+            // 获取集成决策
+            const ensembleData = await fetchJSON('/sota/ensemble');
+            const ensembleEl = document.getElementById('ensembleDecision');
+            if (ensembleEl && ensembleData) ensembleEl.innerHTML = renderEnsemble(ensembleData);
+            
+            // 获取模型状态
+            const statusData = await fetchJSON('/sota/status');
+            const statusEl = document.getElementById('modelStatus');
+            if (statusEl && statusData) statusEl.innerHTML = renderModelStatus(statusData);
+        }
+        
+        async function runSOTADecision() {
+            const btn = document.getElementById('sotaBtn');
+            btn.disabled = true;
+            btn.textContent = '⏳ 决策中...';
+            
+            const data = await fetchJSON(`/sota/decision?stock=${currentStock}&force=true`);
+            
+            document.getElementById('llmDecision').innerHTML = renderLLMDecision(data);
+            document.getElementById('factorMining').innerHTML = renderFactorMining(data);
+            document.getElementById('crossModal').innerHTML = renderCrossModal(data);
+            document.getElementById('rlExecution').innerHTML = renderRLExecution(data);
+            document.getElementById('ensembleDecision').innerHTML = renderEnsemble(data);
+            
+            btn.disabled = false;
+            btn.textContent = '⚡ 运行 SOTA 决策';
+        }
+        
+        // 页面加载时刷新
+        window.onload = refreshAll;
+        // 每 30 秒自动刷新
+        setInterval(refreshAll, 30000);
+    </script>
+</body>
+</html>

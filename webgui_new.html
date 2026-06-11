@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <title>Quant System - WebGUI</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --border-color: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            --accent-blue: #58a6ff;
+            --accent-green: #3b82f6;
+            --accent-red: #f85149;
+            --accent-yellow: #d29922;
+            --accent-purple: #bc8cff;
+            --accent-orange: #f0883e;
+            --buy-color: #3b82f6;
+            --sell-color: #f85149;
+            --hold-color: #d29922;
+            --radius: 8px;
+            --radius-sm: 4px;
+            --shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background: var(--bg-primary); color: var(--text-primary); line-height: 1.6; min-height: 100vh; }
+        .header { background: var(--bg-secondary); border-bottom: 1px solid var(--border-color); padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
+        .header-left { display: flex; align-items: center; gap: 16px; }
+        .logo { font-size: 20px; font-weight: 700; color: var(--accent-blue); letter-spacing: -0.5px; }
+        .logo span { color: var(--text-primary); font-weight: 400; }
+        .page-tabs { display: flex; gap: 8px; }
+        .page-tab { padding: 6px 16px; border-radius: 20px; font-size: 13px; cursor: pointer; transition: all 0.2s; border: 1px solid var(--border-color); color: var(--text-secondary); }
+        .page-tab:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+        .page-tab.active { background: var(--accent-blue); color: white; border-color: var(--accent-blue); }
+        .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+        .status-badge.online { background: rgba(59,130,246,0.15); color: var(--accent-green); border: 1px solid rgba(59,130,246,0.3); }
+        .status-badge.offline { background: rgba(248,81,73,0.15); color: var(--accent-red); border: 1px solid rgba(248,81,73,0.3); }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .header-right { display: flex; align-items: center; gap: 12px; }
+        .btn { padding: 6px 16px; border-radius: var(--radius); font-size: 13px; cursor: pointer; border: 1px solid var(--border-color); background: var(--bg-tertiary); color: var(--text-primary); transition: all 0.2s; }
+        .btn:hover { background: var(--border-color); }
+        .btn-primary { background: var(--accent-blue); color: white; border-color: var(--accent-blue); }
+        .btn-primary:hover { background: #4c9aff; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
+        .page-section { display: none; }
+        .page-section.active { display: block; }
+        .section-title { font-size: 18px; font-weight: 600; margin-bottom: 16px; color: var(--text-primary); }
+        .grid { display: grid; gap: 16px; }
+        .grid-2 { grid-template-columns: repeat(2, 1fr); }
+        .grid-3 { grid-template-columns: repeat(3, 1fr); }
+        .grid-4 { grid-template-columns: repeat(4, 1fr); }
+        .card { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 20px; }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .card-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+        .card-subtitle { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+        .card-body { min-height: 200px; }
+        .chart-container { height: 250px; position: relative; }
+        .loading-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; opacity: 0; pointer-events: none; transition: opacity 0.3s; }
+        .loading-overlay.active { opacity: 1; pointer-events: auto; }
+        .spinner { width: 40px; height: 40px; border: 3px solid var(--border-color); border-top-color: var(--accent-blue); border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .notification { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: var(--radius); font-size: 14px; z-index: 1001; opacity: 0; transform: translateY(-10px); transition: all 0.3s; }
+        .notification.show { opacity: 1; transform: translateY(0); }
+        .notification.success { background: rgba(59,130,246,0.9); color: white; }
+        .notification.error { background: rgba(248,81,73,0.9); color: white; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border-color); font-size: 13px; }
+        th { color: var(--text-secondary); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+        td { color: var(--text-primary); }
+        tr:hover td { background: var(--bg-tertiary); }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+        .badge-buy { background: rgba(59,130,246,0.15); color: var(--accent-green); }
+        .badge-sell { background: rgba(248,81,73,0.15); color: var(--accent-red); }
+        .badge-hold { background: rgba(210,153,34,0.15); color: var(--accent-yellow); }
+        .badge-bullish { background: rgba(59,130,246,0.15); color: var(--accent-green); }
+        .badge-bearish { background: rgba(248,81,73,0.15); color: var(--accent-red); }
+        .badge-neutral { background: rgba(210,153,34,0.15); color: var(--accent-yellow); }
+        .stat-value { font-size: 28px; font-weight: 700; color: var(--text-primary); }
+        .stat-label { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+        .stat-change { font-size: 12px; margin-top: 4px; }
+        .stat-change.up { color: var(--accent-green); }
+        .stat-change.down { color: var(--accent-red); }
+        .strategy-section { margin-top: 24px; }
+        .strategy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+        .strategy-card { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 20px; }
+        .strategy-card h4 { font-size: 16px; font-weight: 600; margin-bottom: 12px; color: var(--accent-blue); }
+        .strategy-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color); font-size: 13px; }
+        .strategy-row:last-child { border-bottom: none; }
+        .strategy-label { color: var(--text-secondary); }
+        .strategy-value { color: var(--text-primary); font-weight: 600; }
+        .kelly-bar { height: 8px; background: var(--bg-tertiary); border-radius: 4px; margin-top: 8px; overflow: hidden; }
+        .kelly-fill { height: 100%; background: linear-gradient(90deg, var(--accent-green), var(--accent-blue)); border-radius: 4px; transition: width 0.5s; }
+        .rsi-meter { position: relative; height: 20px; background: linear-gradient(90deg, var(--accent-red) 0%, var(--accent-yellow) 50%, var(--accent-green) 100%); border-radius: 10px; margin: 12px 0; }
+        .rsi-marker { position: absolute; top: -4px; width: 3px; height: 28px; background: white; border-radius: 1px; transition: left 0.5s; }
+        .rsi-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+        .trend-indicator { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 600; }
+        .trend-indicator.bullish { background: rgba(59,130,246,0.15); color: var(--accent-green); }
+        .trend-indicator.bearish { background: rgba(248,81,73,0.15); color: var(--accent-red); }
+        .trend-indicator.neutral { background: rgba(210,153,34,0.15); color: var(--accent-yellow); }
+        .arrow { font-size: 16px; }
+    </style>
+</head>
+<body>
+    <div class="loading-overlay" id="loadingOverlay"><div class="spinner"></div></div>
+    <div class="notification" id="notification"></div>
+
+    <div class="header">
+        <div class="header-left">
+            <div class="logo">Quant<span>GUI</span></div>
+            <div class="page-tabs">
+                <div class="page-tab active" data-page="dashboard" onclick="switchPage('dashboard')">Dashboard</div>
+                <div class="page-tab" data-page="analysis" onclick="switchPage('analysis')">Analysis</div>
+                <div class="page-tab" data-page="strategy" onclick="switchPage('strategy')">Strategy</div>
+                <div class="page-tab" data-page="backtest" onclick="switchPage('backtest')">Backtest</div>
+            </div>
+            <div class="status-badge online" id="connectionStatus">
+                <div class="status-dot"></div>
+                <span id="statusText">Online</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <span id="lastUpdate" style="font-size: 12px; color: var(--text-secondary);"></span>
+            <button class="btn btn-primary" onclick="refreshAll()">Refresh</button>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- Dashboard Page -->
+        <div class="page-section active" id="dashboardPage">
+            <div class="quick-summary" id="dashboardQuickSummary">
+                <div class="grid grid-4">
+                    <div class="card"><div class="stat-value" id="dashPrice">--</div><div class="stat-label">Price</div></div>
+                    <div class="card"><div class="stat-value" id="dashChange">--</div><div class="stat-label">Change %</div></div>
+                    <div class="card"><div class="stat-value" id="dashTurnover">--</div><div class="stat-label">Turnover</div></div>
+                    <div class="card"><div class="stat-value" id="dashRSI">--</div><div class="stat-label">RSI(14)</div></div>
+                </div>
+            </div>
+            <div class="section-title" style="margin-top: 24px;">K-Line Scores</div>
+            <div class="card">
+                <div class="grid grid-4" id="klineScoresGrid" style="margin-bottom: 16px;">
+                    <div><div class="stat-value" id="scoreMorphology">--</div><div class="stat-label">Morphology</div></div>
+                    <div><div class="stat-value" id="scoreVolume">--</div><div class="stat-label">Volume</div></div>
+                    <div><div class="stat-value" id="scorePosition">--</div><div class="stat-label">Position</div></div>
+                    <div><div class="stat-value" id="scoreRSI">--</div><div class="stat-label">RSI</div></div>
+                </div>
+                <div class="grid grid-2">
+                    <div><strong>Bullish Signals:</strong><div id="bullishSignals" style="margin-top: 8px;"></div></div>
+                    <div><strong>Bearish Signals:</strong><div id="bearishSignals" style="margin-top: 8px;"></div></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Analysis Page -->
+        <div class="page-section" id="analysisPage">
+            <div class="section-title">Analysis</div>
+            <div class="grid grid-2">
+                <div class="card">
+                    <div class="card-header"><div class="card-title">Technical Indicators</div></div>
+                    <div class="card-body">
+                        <div class="strategy-row"><span class="strategy-label">RSI</span><span class="strategy-value" id="anaRSI">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">MACD</span><span class="strategy-value" id="anaMACD">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">KDJ</span><span class="strategy-value" id="anaKDJ">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Short Trend</span><span class="strategy-value" id="anaShortTrend">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Medium Trend</span><span class="strategy-value" id="anaMediumTrend">--</span></div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><div class="card-title">Multi-Cycle RSI</div></div>
+                    <div class="card-body">
+                        <div class="rsi-meter"><div class="rsi-marker" id="rsiMarker14"></div></div>
+                        <div class="rsi-labels"><span>0</span><span>20</span><span>50</span><span>80</span><span>100</span></div>
+                        <div class="grid grid-3" style="margin-top: 16px;">
+                            <div><div class="stat-value" id="rsi6">--</div><div class="stat-label">RSI(6)</div></div>
+                            <div><div class="stat-value" id="rsi25">--</div><div class="stat-label">RSI(25)</div></div>
+                            <div><div class="stat-value" id="rsi60">--</div><div class="stat-label">RSI(60)</div></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Strategy Page -->
+        <div class="page-section" id="strategyPage">
+            <div class="section-title">Strategy Analysis</div>
+            <div class="strategy-section">
+                <div class="grid grid-2">
+                    <div class="strategy-card">
+                        <h4>📊 Kelly Criterion</h4>
+                        <div class="strategy-row"><span class="strategy-label">Kelly Fraction</span><span class="strategy-value" id="kellyFraction">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Position Value</span><span class="strategy-value" id="kellyValue">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Shares</span><span class="strategy-value" id="kellyShares">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Win Rate</span><span class="strategy-value" id="kellyWinRate">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Win/Loss Ratio</span><span class="strategy-value" id="kellyWinLoss">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">CVaR Risk</span><span class="strategy-value" id="kellyCVaR">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">CVaR Within Limit</span><span class="strategy-value" id="kellyCVaRWithin">--</span></div>
+                        <div class="kelly-bar"><div class="kelly-fill" id="kellyBar" style="width: 0%"></div></div>
+                    </div>
+                    <div class="strategy-card">
+                        <h4>📈 ATR Trend-Aware Stop</h4>
+                        <div class="strategy-row"><span class="strategy-label">Stop Loss Price</span><span class="strategy-value" id="atrStop">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Stop Loss %</span><span class="strategy-value" id="atrStopPct">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Take Profit Price</span><span class="strategy-value" id="atrProfit">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Trailing Stop</span><span class="strategy-value" id="atrTrailing">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">ATR</span><span class="strategy-value" id="atrValue">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Trend</span><span class="strategy-value" id="atrTrend">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Trend Strength</span><span class="strategy-value" id="atrStrength">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">ADX</span><span class="strategy-value" id="atrADX">--</span></div>
+                    </div>
+                </div>
+                <div class="grid grid-2" style="margin-top: 16px;">
+                    <div class="strategy-card">
+                        <h4>📉 RSI Multi-Cycle</h4>
+                        <div class="rsi-meter"><div class="rsi-marker" id="rsiMarkerStrategy"></div></div>
+                        <div class="rsi-labels"><span>0</span><span>20</span><span>50</span><span>80</span><span>100</span></div>
+                        <div class="grid grid-3" style="margin-top: 16px;">
+                            <div><div class="stat-value" id="strRSI6">--</div><div class="stat-label">RSI(6)</div></div>
+                            <div><div class="stat-value" id="strRSI14">--</div><div class="stat-label">RSI(14)</div></div>
+                            <div><div class="stat-value" id="strRSI25">--</div><div class="stat-label">RSI(25)</div></div>
+                        </div>
+                        <div style="margin-top: 16px;">
+                            <div class="trend-indicator" id="rsiTrendIndicator"><span class="arrow">→</span><span id="rsiTrendText">--</span></div>
+                        </div>
+                    </div>
+                    <div class="strategy-card">
+                        <h4>📊 MACD + Bollinger Bands</h4>
+                        <div class="strategy-row"><span class="strategy-label">MACD</span><span class="strategy-value" id="macdValue">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Signal</span><span class="strategy-value" id="macdSignal">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Histogram</span><span class="strategy-value" id="macdHist">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">MACD Trend</span><span class="strategy-value" id="macdTrend">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">BB Upper</span><span class="strategy-value" id="bbUpper">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">BB Middle</span><span class="strategy-value" id="bbMiddle">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">BB Lower</span><span class="strategy-value" id="bbLower">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">%B</span><span class="strategy-value" id="bbPercentB">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Combined Signal</span><span class="strategy-value" id="macdBBCombined">--</span></div>
+                    </div>
+                </div>
+                <div class="grid grid-2" style="margin-top: 16px;">
+                    <div class="strategy-card">
+                        <h4>📊 Volatility Target</h4>
+                        <div class="strategy-row"><span class="strategy-label">Realized Vol</span><span class="strategy-value" id="volRealized">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Vol Level</span><span class="strategy-value" id="volLevel">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Vol Trend</span><span class="strategy-value" id="volTrend">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Vol Adjustment</span><span class="strategy-value" id="volAdj">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Vol Position</span><span class="strategy-value" id="volPosition">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Position Value</span><span class="strategy-value" id="volValue">--</span></div>
+                    </div>
+                    <div class="strategy-card">
+                        <h4>📊 Sector Rotation</h4>
+                        <div class="strategy-row"><span class="strategy-label">Recommendation</span><span class="strategy-value" id="sectorRec">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Industry</span><span class="strategy-value" id="sectorIndustry">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">PE vs Industry</span><span class="strategy-value" id="sectorPE">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Momentum Score</span><span class="strategy-value" id="sectorMomentum">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Rating</span><span class="strategy-value" id="sectorRating">--</span></div>
+                        <div class="strategy-row"><span class="strategy-label">Trend</span><span class="strategy-value" id="sectorTrend">--</span></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Backtest Page -->
+        <div class="page-section" id="backtestPage">
+            <div class="section-title">Backtest Results</div>
+            <div class="grid grid-4" id="backtestStats" style="margin-bottom: 16px;">
+                <div class="card"><div class="stat-value" id="btSegments">--</div><div class="stat-label">Segments</div></div>
+                <div class="card"><div class="stat-value" id="btAvgReturn">--</div><div class="stat-label">Avg Return %</div></div>
+                <div class="card"><div class="stat-value" id="btAvgSharpe">--</div><div class="stat-label">Avg Sharpe</div></div>
+                <div class="card"><div class="stat-value" id="btWinRate">--</div><div class="stat-label">Win Rate %</div></div>
+            </div>
+            <div class="card">
+                <div class="table-wrapper">
+                    <table id="backtestTable">
+                        <thead><tr><th>Period</th><th>Return %</th><th>Sharpe</th><th>Max DD %</th><th>Trades</th><th>Params</th></tr></thead>
+                        <tbody id="backtestBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const state = {
+            stock: {}, klineScores: {}, signals: {}, positions: {}, performance: {},
+            stocks: {}, strategy: {}, kelly: {}, atr: {}, rsi: {}, volatility: {},
+            macdBB: {}, sector: {}, backtest: {}
+        };
+
+        const CONFIG = { API_BASE: '/api', REFRESH_INTERVAL: 30000, TRADING_HOURS: [[9,15],[13,15]] };
+
+        function isTradingHours() {
+            const now = new Date();
+            const h = now.getHours();
+            return (h >= 9 && h < 11) || (h >= 13 && h < 15);
+        }
+        function getRefreshInterval() { return isTradingHours() ? 5000 : 60000; }
+
+        async function apiGet(url) {
+            try { const r = await fetch(CONFIG.API_BASE + url); return await r.json(); }
+            catch(e) { console.error('API Error:', e); return null; }
+        }
+        async function apiPost(url) {
+            try { const r = await fetch(CONFIG.API_BASE + url, { method: 'POST' }); return await r.json(); }
+            catch(e) { console.error('API Error:', e); return null; }
+        }
+
+        function switchPage(page) {
+            document.querySelectorAll('.page-tab').forEach(t => t.classList.remove('active'));
+            document.querySelector(`[data-page="${page}"]`).classList.add('active');
+            document.querySelectorAll('.page-section').forEach(s => s.classList.remove('active'));
+            document.getElementById(page + 'Page').classList.add('active');
+        }
+
+        async function fetchAll() {
+            await Promise.all([
+                apiGet('/stock/sz300620').then(d => { if(d) state.stock = d.data || d; }),
+                apiGet('/quant/kline-scores').then(d => { if(d) state.klineScores = d; }),
+                apiGet('/quant/signals').then(d => { if(d) state.signals = d; }),
+                apiGet('/quant/positions').then(d => { if(d) state.positions = d; }),
+                apiGet('/quant/performance').then(d => { if(d) state.performance = d; }),
+                apiGet('/quant/stocks').then(d => { if(d) state.stocks = d; }),
+                apiGet('/strategy/enhanced/sz300620').then(d => { if(d) state.strategy = d; }),
+                apiGet('/strategy/kelly/sz300620').then(d => { if(d) state.kelly = d; }),
+                apiGet('/strategy/atr/sz300620').then(d => { if(d) state.atr = d; }),
+                apiGet('/strategy/rsi/sz300620').then(d => { if(d) state.rsi = d; }),
+                apiGet('/strategy/volatility/sz300620').then(d => { if(d) state.volatility = d; }),
+                apiGet('/strategy/macd-bollinger/sz300620').then(d => { if(d) state.macdBB = d; }),
+                apiGet('/strategy/sector/sz300620').then(d => { if(d) state.sector = d; }),
+                apiGet('/backtest/sz300620').then(d => { if(d) state.backtest = d; }),
+            ]);
+            renderAll();
+        }
+
+        async function fetchHealth() {
+            const d = await apiGet('/health');
+            if(d) {
+                document.getElementById('connectionStatus').className = 'status-badge online';
+                document.getElementById('statusText').textContent = 'Online';
+            }
+        }
+
+        function renderAll() {
+            renderDashboard();
+            renderAnalysis();
+            renderStrategy();
+            renderBacktest();
+            document.getElementById('lastUpdate').textContent = new Date().toLocaleString('zh-CN');
+        }
+
+        function renderDashboard() {
+            const s = state.stock;
+            if(s.price) document.getElementById('dashPrice').textContent = s.price.toFixed(2);
+            if(s.change_pct) document.getElementById('dashChange').textContent = (s.change_pct > 0 ? '+' : '') + s.change_pct.toFixed(2) + '%';
+            if(s.turnover) document.getElementById('dashTurnover').textContent = s.turnover.toFixed(0);
+            const ks = state.klineScores;
+            if(ks.scores) {
+                document.getElementById('scoreMorphology').textContent = ks.scores.morphology_score?.length || '--';
+                document.getElementById('scoreVolume').textContent = ks.scores.volume_score?.length || '--';
+                document.getElementById('scorePosition').textContent = ks.scores.position_score || '--';
+                document.getElementById('scoreRSI').textContent = ks.scores.rsi_score || '--';
+            }
+            if(ks.scores) {
+                document.getElementById('bullishSignals').innerHTML = (ks.scores.bullish_signals || []).map(s => `<span class="badge badge-buy" style="margin:2px;">${s}</span>`).join('');
+                document.getElementById('bearishSignals').innerHTML = (ks.scores.bearish_signals || []).map(s => `<span class="badge badge-sell" style="margin:2px;">${s}</span>`).join('');
+            }
+        }
+
+        function renderAnalysis() {
+            const ks = state.klineScores;
+            if(ks.technical) {
+                document.getElementById('anaRSI').textContent = ks.technical.rsi || '--';
+                document.getElementById('anaMACD').textContent = ks.technical.macd || '--';
+                document.getElementById('anaKDJ').textContent = ks.technical.kdj || '--';
+                document.getElementById('anaShortTrend').textContent = ks.technical.short_term_trend || '--';
+                document.getElementById('anaMediumTrend').textContent = ks.technical.medium_term_trend || '--';
+            }
+            const rsi = state.rsi;
+            if(rsi.rsi) {
+                const v = rsi.rsi.values;
+                document.getElementById('rsi6').textContent = v.rsi_6 || '--';
+                document.getElementById('rsi25').textContent = v.rsi_25 || '--';
+                document.getElementById('rsi60').textContent = v.rsi_60 || '--';
+                const m14 = document.getElementById('rsiMarker14');
+                if(v.rsi_14) m14.style.left = v.rsi_14 + '%';
+            }
+        }
+
+        function renderStrategy() {
+            // Kelly
+            const k = state.kelly;
+            if(k.kelly_position) {
+                document.getElementById('kellyFraction').textContent = (k.kelly_position.kelly_fraction * 100).toFixed(1) + '%';
+                document.getElementById('kellyValue').textContent = '¥' + (k.kelly_position.position_value / 10000).toFixed(2) + '万';
+                document.getElementById('kellyShares').textContent = k.kelly_position.shares;
+                document.getElementById('kellyWinRate').textContent = (k.kelly_position.win_rate * 100).toFixed(1) + '%';
+                document.getElementById('kellyWinLoss').textContent = k.kelly_position.win_loss_ratio;
+                document.getElementById('kellyCVaR').textContent = k.kelly_position.cvar_risk;
+                document.getElementById('kellyCVaRWithin').textContent = k.kelly_position.cvar_within_limit ? '✅ Yes' : '❌ No';
+                document.getElementById('kellyBar').style.width = (k.kelly_position.kelly_fraction * 100) + '%';
+            }
+            if(k.kelly_params) {
+                document.getElementById('kellyFraction').textContent = (k.kelly_params.fractional_kelly * 100).toFixed(1) + '%';
+            }
+
+            // ATR
+            const a = state.atr;
+            if(a.atr_stop) {
+                document.getElementById('atrStop').textContent = a.atr_stop.stop_loss_price;
+                document.getElementById('atrStopPct').textContent = a.atr_stop.stop_loss_pct + '%';
+                document.getElementById('atrProfit').textContent = a.atr_stop.take_profit_price;
+                document.getElementById('atrTrailing').textContent = a.atr_stop.trailing_stop;
+                document.getElementById('atrValue').textContent = a.atr_stop.atr;
+                document.getElementById('atrTrend').textContent = a.atr_stop.trend;
+                document.getElementById('atrStrength').textContent = a.atr_stop.trend_strength;
+            }
+            if(a.adx) {
+                document.getElementById('atrADX').textContent = a.adx.adx;
+            }
+
+            // RSI
+            const r = state.rsi;
+            if(r.rsi) {
+                const v = r.rsi.values;
+                document.getElementById('strRSI6').textContent = v.rsi_6 || '--';
+                document.getElementById('strRSI14').textContent = v.rsi_14 || '--';
+                document.getElementById('strRSI25').textContent = v.rsi_25 || '--';
+                const m = document.getElementById('rsiMarkerStrategy');
+                if(v.rsi_14) m.style.left = v.rsi_14 + '%';
+                const ind = document.getElementById('rsiTrendIndicator');
+                const t = r.rsi.summary?.trend || 'neutral';
+                ind.className = 'trend-indicator ' + t;
+                document.getElementById('rsiTrendText').textContent = t;
+            }
+
+            // MACD + BB
+            const m = state.macdBB;
+            if(m.macd) {
+                document.getElementById('macdValue').textContent = m.macd.macd;
+                document.getElementById('macdSignal').textContent = m.macd.signal;
+                document.getElementById('macdHist').textContent = m.macd.histogram;
+                document.getElementById('macdTrend').textContent = m.macd.trend;
+            }
+            if(m.bollinger) {
+                document.getElementById('bbUpper').textContent = m.bollinger.upper;
+                document.getElementById('bbMiddle').textContent = m.bollinger.middle;
+                document.getElementById('bbLower').textContent = m.bollinger.lower;
+                document.getElementById('bbPercentB').textContent = m.bollinger.percent_b;
+            }
+            if(m.combined) {
+                const c = m.combined.combined_signal;
+                document.getElementById('macdBBCombined').innerHTML = `<span class="badge badge-${c.toLowerCase()}">${c}</span> (${m.combined.combined_strength})`;
+            }
+
+            // Volatility
+            const v = state.volatility;
+            if(v.volatility) {
+                document.getElementById('volRealized').textContent = (v.volatility.realized_vol * 100).toFixed(2) + '%';
+                document.getElementById('volLevel').textContent = v.volatility.volatility_level;
+                document.getElementById('volAdj').textContent = v.volatility.vol_adjustment;
+                document.getElementById('volPosition').textContent = (v.volatility.vol_position * 100).toFixed(1) + '%';
+                document.getElementById('volValue').textContent = '¥' + (v.volatility.position_value / 10000).toFixed(2) + '万';
+            }
+            if(v.vol_trend) {
+                document.getElementById('volTrend').textContent = v.vol_trend;
+            }
+
+            // Sector
+            const s = state.sector;
+            if(s.sector) {
+                document.getElementById('sectorRec').textContent = s.sector.recommendation;
+                document.getElementById('sectorIndustry').textContent = s.sector.industry;
+                document.getElementById('sectorPE').textContent = s.sector.pe_vs_industry;
+                document.getElementById('sectorRating').textContent = s.sector.rating;
+            }
+            if(s.momentum) {
+                document.getElementById('sectorMomentum').textContent = s.momentum.combined_score;
+            }
+            if(s.trend) {
+                document.getElementById('sectorTrend').textContent = s.trend;
+            }
+        }
+
+        function renderBacktest() {
+            const b = state.backtest;
+            if(b.backtest) {
+                const bt = b.backtest;
+                document.getElementById('btSegments').textContent = bt.num_segments || '--';
+                document.getElementById('btAvgReturn').textContent = (bt.avg_return || 0).toFixed(2);
+                document.getElementById('btAvgSharpe').textContent = (bt.avg_sharpe || 0).toFixed(2);
+                document.getElementById('btWinRate').textContent = (bt.win_rate || 0).toFixed(1);
+                const tbody = document.getElementById('backtestBody');
+                tbody.innerHTML = '';
+                (bt.segment_results || []).forEach(seg => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td>${seg.start_date} → ${seg.end_date}</td><td>${seg.return.toFixed(2)}%</td><td>${seg.sharpe.toFixed(2)}</td><td>${seg.max_dd.toFixed(2)}%</td><td>${seg.num_trades}</td><td>${JSON.stringify(seg.params)}</td>`;
+                    tbody.appendChild(tr);
+                });
+            }
+        }
+
+        async function refreshAll() {
+            showLoading(true);
+            await fetchAll();
+            showNotification('Data refreshed');
+            showLoading(false);
+        }
+
+        function showLoading(show) {
+            document.getElementById('loadingOverlay').className = show ? 'loading-overlay active' : 'loading-overlay';
+            document.getElementById('refreshBtn').className = show ? 'btn btn-primary btn-loading' : 'btn btn-primary';
+        }
+
+        function showNotification(message, type = 'success') {
+            const el = document.getElementById('notification');
+            el.textContent = message;
+            el.className = 'notification ' + type + ' show';
+            setTimeout(() => { el.className = 'notification ' + type; }, 3000);
+        }
+
+        function startAutoRefresh() {
+            if(state.refreshTimer) clearInterval(state.refreshTimer);
+            state.refreshTimer = setInterval(() => { if(isTradingHours()) fetchAll(); }, getRefreshInterval());
+        }
+
+        async function init() {
+            const path = window.location.pathname;
+            CONFIG.API_BASE = path.startsWith('/webgui') ? '' : '/api';
+            await fetchHealth();
+            await fetchAll();
+            startAutoRefresh();
+            setInterval(fetchHealth, 60000);
+        }
+
+        if(document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+        } else { init(); }
+    </script>
+</body>
+</html>

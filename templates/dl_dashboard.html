@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <title>Deep Learning Dashboard - Stock Analyzer</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --border-color: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent-blue: #58a6ff;
+            --accent-green: #3b82f6;
+            --accent-red: #f85149;
+            --accent-yellow: #d29922;
+            --accent-purple: #bc8cff;
+            --radius: 8px;
+            --radius-sm: 4px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .header {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+            padding: 20px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            color: var(--accent-blue);
+        }
+
+        .header p {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-top: 4px;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .btn:hover { background: var(--border-color); }
+        .btn-primary { background: var(--accent-blue); border-color: var(--accent-blue); color: #fff; }
+        .btn-primary:hover { background: #4090e0; }
+
+        .grid {
+            display: grid;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .grid-2 { grid-template-columns: repeat(2, 1fr); }
+        .grid-3 { grid-template-columns: repeat(3, 1fr); }
+        .grid-4 { grid-template-columns: repeat(4, 1fr); }
+
+        @media (max-width: 1024px) {
+            .grid-2, .grid-3, .grid-4 { grid-template-columns: repeat(2, 1fr); }
+        }
+
+        @media (max-width: 768px) {
+            .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+        }
+
+        .card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+            overflow: hidden;
+        }
+
+        .card-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .card-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .card-body {
+            padding: 20px;
+        }
+
+        .model-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .model-badge.active { background: rgba(59, 130, 246, 0.15); color: var(--accent-green); }
+        .model-badge.inactive { background: rgba(139, 92, 246, 0.15); color: var(--accent-purple); }
+
+        .prediction-display {
+            text-align: center;
+            padding: 30px;
+        }
+
+        .prediction-direction {
+            font-size: 48px;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+
+        .prediction-direction.up { color: var(--accent-green); }
+        .prediction-direction.down { color: var(--accent-red); }
+        .prediction-direction.neutral { color: var(--accent-yellow); }
+
+        .prediction-confidence {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        .probability-bars {
+            margin-top: 20px;
+        }
+
+        .probability-bar {
+            margin-bottom: 12px;
+        }
+
+        .probability-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            margin-bottom: 4px;
+        }
+
+        .probability-fill {
+            height: 8px;
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .probability-fill > span {
+            display: block;
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s;
+        }
+
+        .probability-fill.up > span { background: var(--accent-green); }
+        .probability-fill.down > span { background: var(--accent-red); }
+        .probability-fill.neutral > span { background: var(--accent-yellow); }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 12px;
+        }
+
+        .feature-item {
+            background: var(--bg-tertiary);
+            padding: 12px;
+            border-radius: var(--radius-sm);
+            text-align: center;
+        }
+
+        .feature-name {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
+
+        .feature-value {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--accent-blue);
+        }
+
+        .architecture-diagram {
+            background: var(--bg-tertiary);
+            padding: 20px;
+            border-radius: var(--radius-sm);
+            font-family: monospace;
+            font-size: 12px;
+            line-height: 1.8;
+        }
+
+        .architecture-diagram .layer {
+            padding: 8px 16px;
+            margin: 4px 0;
+            background: var(--bg-secondary);
+            border-radius: 4px;
+            border-left: 3px solid var(--accent-blue);
+        }
+
+        .architecture-diagram .arrow {
+            text-align: center;
+            color: var(--text-secondary);
+            padding: 4px;
+        }
+
+        .rl-status {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 16px;
+            background: var(--bg-tertiary);
+            border-radius: var(--radius-sm);
+        }
+
+        .rl-status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        .rl-status-dot.active { background: var(--accent-green); }
+        .rl-status-dot.inactive { background: var(--accent-red); }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .sentiment-score {
+            font-size: 36px;
+            font-weight: 700;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .sentiment-score.positive { color: var(--accent-green); }
+        .sentiment-score.negative { color: var(--accent-red); }
+        .sentiment-score.neutral { color: var(--accent-yellow); }
+
+        .news-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .news-item {
+            padding: 12px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .news-item:last-child { border-bottom: none; }
+
+        .news-title {
+            font-size: 13px;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+
+        .news-meta {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border-color);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .nav-link {
+            display: inline-block;
+            margin-top: 16px;
+            color: var(--accent-blue);
+            text-decoration: none;
+        }
+
+        .nav-link:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>Deep Learning Dashboard</h1>
+            <p>Transformer-LSTM | PPO/SAC RL | Self-Attention GRU | FinBERT</p>
+            <a href="/webgui.html" class="nav-link">Back to Main Dashboard</a>
+        </div>
+        <div>
+            <button class="btn" onclick="refreshAll()">Refresh Data</button>
+            <button class="btn btn-primary" onclick="trainRLModel()">Train RL Model</button>
+        </div>
+    </div>
+
+    <div class="grid grid-2">
+        <!-- DL Prediction Card -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Deep Learning Prediction</span>
+                <span class="model-badge active">Transformer-LSTM</span>
+            </div>
+            <div class="card-body">
+                <div id="dlPrediction" class="prediction-display">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        Loading prediction...
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- RL Trader Status Card -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">RL Trader Status</span>
+                <span class="model-badge" id="rlStatusBadge">PPO+SAC</span>
+            </div>
+            <div class="card-body">
+                <div id="rlStatus">
+                    <div class="rl-status">
+                        <div class="rl-status-dot inactive" id="rlStatusDot"></div>
+                        <div>
+                            <div id="rlStatusText">RL Model Not Trained</div>
+                            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+                                Market Regime: <span id="rlMarketRegime">Unknown</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="margin-top: 16px;">
+                        <button class="btn btn-primary" onclick="trainRLModel()">Train PPO Agent</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid grid-2">
+        <!-- Architecture Card -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Model Architecture</span>
+            </div>
+            <div class="card-body">
+                <div class="architecture-diagram">
+                    <div class="layer">Input: Features (RSI, MACD, Volume, Momentum...)</div>
+                    <div class="arrow">↓</div>
+                    <div class="layer">Positional Encoding</div>
+                    <div class="arrow">↓</div>
+                    <div class="layer">Transformer Encoder (8 heads, 2 layers)</div>
+                    <div class="arrow">↓</div>
+                    <div class="layer">LSTM Layer (hidden=128)</div>
+                    <div class="arrow">↓</div>
+                    <div class="layer">Self-Attention Pooling</div>
+                    <div class="arrow">↓</div>
+                    <div class="layer">FFN Head → Direction + Confidence</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- FinBERT Sentiment Card -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">FinBERT Sentiment Analysis</span>
+                <span class="model-badge active">NLP</span>
+            </div>
+            <div class="card-body">
+                <div id="sentimentDisplay">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        Loading sentiment...
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid">
+        <!-- Model Report Card -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Model Ensemble Report</span>
+            </div>
+            <div class="card-body">
+                <div id="ensembleReport">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        Loading report...
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const CONFIG = {
+            STOCK_CODE: 'sz300620',
+            API_BASE: ''
+        };
+
+        let state = {
+            dlPrediction: null,
+            rlStatus: null,
+            sentiment: null,
+            ensembleReport: null
+        };
+
+        async function apiGet(endpoint) {
+            try {
+                const resp = await fetch(CONFIG.API_BASE + endpoint);
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                return await resp.json();
+            } catch (e) {
+                console.error('API error:', e);
+                return { success: false, error: e.message };
+            }
+        }
+
+        async function apiPost(endpoint, data = {}) {
+            try {
+                const resp = await fetch(CONFIG.API_BASE + endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                return await resp.json();
+            } catch (e) {
+                console.error('API error:', e);
+                return { success: false, error: e.message };
+            }
+        }
+
+        async function loadDLPrediction() {
+            const result = await apiGet(`/api/dl/predict/${CONFIG.STOCK_CODE}`);
+            const container = document.getElementById('dlPrediction');
+
+            if (!result.success || !result.prediction) {
+                container.innerHTML = `
+                    <div class="prediction-direction neutral">N/A</div>
+                    <div class="prediction-confidence">Prediction unavailable</div>
+                `;
+                return;
+            }
+
+            const pred = result.prediction;
+            const directionClass = pred.direction === 'up' ? 'up' : pred.direction === 'down' ? 'down' : 'neutral';
+            const directionText = pred.direction === 'up' ? ' bullish' : pred.direction === 'down' ? 'bearish' : 'neutral';
+
+            container.innerHTML = `
+                <div class="prediction-direction ${directionClass}">${directionText.toUpperCase()}</div>
+                <div class="prediction-confidence">Confidence: ${(pred.confidence * 100).toFixed(1)}%</div>
+                <div class="probability-bars">
+                    <div class="probability-bar">
+                        <div class="probability-label">
+                            <span>Up</span>
+                            <span>${(pred.probabilities.up * 100).toFixed(1)}%</span>
+                        </div>
+                        <div class="probability-fill up"><span style="width: ${pred.probabilities.up * 100}%"></span></div>
+                    </div>
+                    <div class="probability-bar">
+                        <div class="probability-label">
+                            <span>Neutral</span>
+                            <span>${(pred.probabilities.neutral * 100).toFixed(1)}%</span>
+                        </div>
+                        <div class="probability-fill neutral"><span style="width: ${pred.probabilities.neutral * 100}%"></span></div>
+                    </div>
+                    <div class="probability-bar">
+                        <div class="probability-label">
+                            <span>Down</span>
+                            <span>${(pred.probabilities.down * 100).toFixed(1)}%</span>
+                        </div>
+                        <div class="probability-fill down"><span style="width: ${pred.probabilities.down * 100}%"></span></div>
+                    </div>
+                </div>
+            `;
+            state.dlPrediction = pred;
+        }
+
+        async function loadRLStatus() {
+            const result = await apiGet('/api/rl/trader/status');
+            const container = document.getElementById('rlStatus');
+
+            if (!result.success || !result.status) {
+                return;
+            }
+
+            const status = result.status;
+            const dot = document.getElementById('rlStatusDot');
+            const text = document.getElementById('rlStatusText');
+            const regime = document.getElementById('rlMarketRegime');
+
+            if (status.trained) {
+                dot.className = 'rl-status-dot active';
+                text.textContent = 'RL Model Trained & Ready';
+            } else {
+                dot.className = 'rl-status-dot inactive';
+                text.textContent = 'RL Model Not Trained';
+            }
+
+            regime.textContent = status.market_regime || 'Unknown';
+            state.rlStatus = status;
+        }
+
+        async function trainRLModel() {
+            const btn = event.target;
+            btn.textContent = 'Training...';
+            btn.disabled = true;
+
+            const result = await apiPost(`/api/rl/train/${CONFIG.STOCK_CODE}`, { n_episodes: 30 });
+
+            btn.textContent = 'Train PPO Agent';
+            btn.disabled = false;
+
+            if (result.success) {
+                alert(`Training complete! Mean Reward: ${result.training_result.mean_reward.toFixed(4)}`);
+                loadRLStatus();
+            } else {
+                alert(`Training failed: ${result.error}`);
+            }
+        }
+
+        async function loadSentiment() {
+            const result = await apiGet(`/api/sentiment/bert/${CONFIG.STOCK_CODE}`);
+            const container = document.getElementById('sentimentDisplay');
+
+            if (!result.success || !result.sentiment) {
+                container.innerHTML = '<div class="sentiment-score neutral">N/A</div><p style="text-align:center;color:var(--text-secondary)">Sentiment analysis unavailable</p>';
+                return;
+            }
+
+            const sent = result.sentiment;
+            const score = sent.score || 0;
+            let scoreClass = 'neutral';
+            let scoreText = 'Neutral';
+
+            if (score > 0.15) {
+                scoreClass = 'positive';
+                scoreText = 'Positive';
+            } else if (score < -0.15) {
+                scoreClass = 'negative';
+                scoreText = 'Negative';
+            }
+
+            container.innerHTML = `
+                <div class="sentiment-score ${scoreClass}">${score.toFixed(3)}</div>
+                <p style="text-align:center;color:var(--text-secondary);margin-top:8px">${scoreText}</p>
+                <div style="display:flex;justify-content:space-around;margin-top:16px">
+                    <div style="text-align:center">
+                        <div style="font-size:24px;font-weight:600;color:var(--accent-green)">${(sent.positive * 100).toFixed(0)}%</div>
+                        <div style="font-size:12px;color:var(--text-secondary)">Positive</div>
+                    </div>
+                    <div style="text-align:center">
+                        <div style="font-size:24px;font-weight:600;color:var(--accent-yellow)">${(sent.neutral * 100).toFixed(0)}%</div>
+                        <div style="font-size:12px;color:var(--text-secondary)">Neutral</div>
+                    </div>
+                    <div style="text-align:center">
+                        <div style="font-size:24px;font-weight:600;color:var(--accent-red)">${(sent.negative * 100).toFixed(0)}%</div>
+                        <div style="font-size:12px;color:var(--text-secondary)">Negative</div>
+                    </div>
+                </div>
+            `;
+            state.sentiment = sent;
+        }
+
+        async function loadEnsembleReport() {
+            const result = await apiGet('/api/dl/ensemble/report');
+            const container = document.getElementById('ensembleReport');
+
+            if (!result.success || !result.report) {
+                container.innerHTML = '<div class="loading">Report unavailable</div>';
+                return;
+            }
+
+            const report = result.report;
+            container.innerHTML = `
+                <div class="feature-grid">
+                    <div class="feature-item">
+                        <div class="feature-name">Transformer-LSTM</div>
+                        <div class="feature-value">${report.models.transformer_lstm.d_model}d</div>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-name">Attention Heads</div>
+                        <div class="feature-value">${report.models.transformer_lstm.num_heads}</div>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-name">LSTM Hidden</div>
+                        <div class="feature-value">${report.models.transformer_lstm.lstm_hidden}</div>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-name">GRU Hidden</div>
+                        <div class="feature-value">${report.models.attention_gru.hidden_dim}</div>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-name">Ensemble Method</div>
+                        <div class="feature-value">Weighted Avg</div>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-name">Model Trained</div>
+                        <div class="feature-value" style="color:${report.trained ? 'var(--accent-green)' : 'var(--accent-red)'}">${report.trained ? 'Yes' : 'No'}</div>
+                    </div>
+                </div>
+            `;
+            state.ensembleReport = report;
+        }
+
+        async function refreshAll() {
+            await loadDLPrediction();
+            await loadRLStatus();
+            await loadSentiment();
+            await loadEnsembleReport();
+        }
+
+        async function init() {
+            await refreshAll();
+            // Auto refresh every 60 seconds
+            setInterval(refreshAll, 60000);
+        }
+
+        init();
+    </script>
+</body>
+</html>

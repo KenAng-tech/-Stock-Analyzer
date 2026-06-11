@@ -1,0 +1,1185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Analyzer - 股票深度分析系统</title>
+    <link rel="stylesheet" href="/static/css/style.css?v=9">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <div class="logo">
+                    <i class="fas fa-chart-line"></i>
+                    <h1>Stock Analyzer</h1>
+                </div>
+                <nav class="nav">
+                    <a href="#" class="nav-link active" onclick="showSection('dashboard')">
+                        <i class="fas fa-home"></i> 仪表盘
+                    </a>
+                    <a href="#" class="nav-link" onclick="showSection('analysis')">
+                        <i class="fas fa-search"></i> 分析
+                    </a>
+                    <a href="#" class="nav-link" onclick="showSection('websocket')">
+                        <i class="fas fa-broadcast-tower"></i> 实时
+                    </a>
+                    <a href="#" class="nav-link" onclick="showSection('heatmap')">
+                        <i class="fas fa-th"></i> 热力图
+                    </a>
+                    <a href="#" class="nav-link" onclick="showSection('alerts')">
+                        <i class="fas fa-bell"></i> 提醒
+                    </a>
+                    <a href="#" class="nav-link" onclick="showSection('report')">
+                        <i class="fas fa-file-alt"></i> 报告
+                    </a>
+                    <a href="#" class="nav-link" onclick="showSection('backtest')">
+                        <i class="fas fa-chart-bar"></i> 回测
+                    </a>
+                    <a href="#" class="nav-link" onclick="showSection('portfolio')">
+                        <i class="fas fa-balance-scale"></i> 优化
+                    </a>
+                    <a href="#" class="nav-link" onclick="showSection('factors')">
+                        <i class="fas fa-sliders-h"></i> 因子
+                    </a>
+                    <a href="#" class="nav-link" onclick="showSection('quant-model'); loadQuantModelTab()">
+                        <i class="fas fa-microchip"></i> 量化模型
+                    </a>
+                    <a href="#" class="nav-link" onclick="showSection('sota')">
+                        <i class="fas fa-robot"></i> SOTA 模型
+                    </a>
+                </nav>
+                <div class="status-indicator">
+                    <span class="status-dot online"></span>
+                    <span class="status-text">在线</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main-content">
+        <div class="container">
+            <section id="dashboard" class="section active">
+                <!-- Hero Section: Stock Selector + Key Metrics -->
+                <div class="dashboard-hero">
+                    <div class="hero-left">
+                        <div class="hero-stock-info">
+                            <div class="hero-stock-name" id="heroStockName">光库科技</div>
+                            <div class="hero-stock-code" id="heroStockCode">sz300620 · 光通信</div>
+                        </div>
+                        <div class="hero-price-row">
+                            <div class="hero-price" id="heroPrice">--</div>
+                            <div class="hero-change" id="heroChange">--</div>
+                        </div>
+                    </div>
+                    <div class="hero-right">
+                        <div class="hero-selector">
+                            <div class="selector-group">
+                                <label>股票代码</label>
+                                <input type="text" id="stockCode" value="sz300620" placeholder="输入代码">
+                            </div>
+                            <div class="selector-group">
+                                <label>持仓成本</label>
+                                <input type="number" id="costBasis" value="120" placeholder="成本价">
+                            </div>
+                            <div class="selector-group">
+                                <label>行业</label>
+                                <select id="industry">
+                                    <option value="光通信" selected>光通信</option>
+                                    <option value="半导体">半导体</option>
+                                    <option value="新能源">新能源</option>
+                                </select>
+                            </div>
+                            <div class="selector-actions">
+                                <button class="btn btn-primary" onclick="refreshData()">
+                                    <i class="fas fa-sync-alt"></i> 刷新
+                                </button>
+                                <button class="btn btn-success" onclick="analyzeStock()">
+                                    <i class="fas fa-microscope"></i> 开始分析
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Overview Cards: 4 Key Metrics -->
+                <div class="overview-cards">
+                    <div class="card card-price card-highlight">
+                        <div class="card-icon"><i class="fas fa-yen-sign"></i></div>
+                        <div class="card-content">
+                            <div class="card-label">当前价格</div>
+                            <div class="card-value" id="currentPrice">--</div>
+                            <div class="card-change" id="priceChange">--</div>
+                        </div>
+                    </div>
+                    <div class="card card-profit card-highlight">
+                        <div class="card-icon"><i class="fas fa-chart-pie"></i></div>
+                        <div class="card-content">
+                            <div class="card-label">持仓盈亏</div>
+                            <div class="card-value" id="profitAmount">--</div>
+                            <div class="card-change" id="profitPercent">--</div>
+                        </div>
+                    </div>
+                    <div class="card card-volume">
+                        <div class="card-icon"><i class="fas fa-exchange-alt"></i></div>
+                        <div class="card-content">
+                            <div class="card-label">成交量</div>
+                            <div class="card-value" id="volume">--</div>
+                            <div class="card-label">手</div>
+                        </div>
+                    </div>
+                    <div class="card card-turnover">
+                        <div class="card-icon"><i class="fas fa-percentage"></i></div>
+                        <div class="card-content">
+                            <div class="card-label">换手率</div>
+                            <div class="card-value" id="turnover">--</div>
+                            <div class="card-label">%</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Quick Stats: Grouped -->
+                <div class="stats-grid">
+                    <!-- 价格区间 -->
+                    <div class="stats-group">
+                        <div class="stats-group-header">
+                            <i class="fas fa-chart-line"></i>
+                            <span>价格区间</span>
+                        </div>
+                        <div class="stats-group-body">
+                            <div class="stat-row">
+                                <span class="stat-label">开盘</span>
+                                <span class="stat-value" id="openPrice">--</span>
+                            </div>
+                            <div class="stat-row">
+                                <span class="stat-label">最高</span>
+                                <span class="stat-value" id="highPrice">--</span>
+                            </div>
+                            <div class="stat-row">
+                                <span class="stat-label">最低</span>
+                                <span class="stat-value" id="lowPrice">--</span>
+                            </div>
+                            <div class="stat-row">
+                                <span class="stat-label">年高/年低</span>
+                                <span class="stat-value" id="yearRange">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 估值指标 -->
+                    <div class="stats-group">
+                        <div class="stats-group-header">
+                            <i class="fas fa-chart-bar"></i>
+                            <span>估值指标</span>
+                        </div>
+                        <div class="stats-group-body">
+                            <div class="stat-row">
+                                <span class="stat-label">市盈率</span>
+                                <span class="stat-value" id="peRatio">--</span>
+                            </div>
+                            <div class="stat-row">
+                                <span class="stat-label">总市值</span>
+                                <span class="stat-value" id="marketCap">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 持仓信息 -->
+                    <div class="stats-group">
+                        <div class="stats-group-header">
+                            <i class="fas fa-wallet"></i>
+                            <span>持仓信息</span>
+                        </div>
+                        <div class="stats-group-body">
+                            <div class="stat-row">
+                                <span class="stat-label">持仓成本</span>
+                                <span class="stat-value" id="costBasisDisplay">--</span>
+                            </div>
+                            <div class="stat-row">
+                                <span class="stat-label">盈亏比例</span>
+                                <span class="stat-value" id="profitPctDisplay">--</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="analysis" class="section">
+                <div class="section-header">
+                    <h2><i class="fas fa-microscope"></i> 深度分析报告</h2>
+                </div>
+                <div id="analysisContent" class="analysis-content">
+                    
+                    <!-- Fundamental Analysis -->
+                    <div class="fundamental-analysis">
+                        <h3><i class="fas fa-chart-bar"></i> 基本面分析</h3>
+                        <div class="fund-metrics">
+                            <div class="fund-metric">
+                                <span class="fund-label">PE</span>
+                                <span class="fund-value" id="fundPe">--</span>
+                                <span class="fund-level" id="fundPeLevel">--</span>
+                            </div>
+                            <div class="fund-metric">
+                                <span class="fund-label">总市值</span>
+                                <span class="fund-value" id="fundMarketCap">--</span>
+                            </div>
+                            <div class="fund-metric">
+                                <span class="fund-label">流通市值</span>
+                                <span class="fund-value" id="fundCirculatingCap">--</span>
+                            </div>
+                            <div class="fund-metric">
+                                <span class="fund-label">营收增长</span>
+                                <span class="fund-value" id="fundRevenueGrowth">--</span>
+                            </div>
+                            <div class="fund-metric">
+                                <span class="fund-label">利润增长</span>
+                                <span class="fund-value" id="fundProfitGrowth">--</span>
+                            </div>
+                            <div class="fund-metric">
+                                <span class="fund-label">毛利率</span>
+                                <span class="fund-value" id="fundGrossMargin">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Technical Analysis -->
+                    <div class="technical-analysis">
+                        <h3><i class="fas fa-chart-line"></i> 技术分析</h3>
+                        <div class="tech-metrics">
+                            <div class="tech-metric">
+                                <span class="tech-label">K线形态</span>
+                                <span class="tech-value" id="techKlinePattern">--</span>
+                            </div>
+                            <div class="tech-metric">
+                                <span class="tech-label">振幅</span>
+                                <span class="tech-value" id="techAmplitude">--</span>
+                            </div>
+                            <div class="tech-metric">
+                                <span class="tech-label">MA5</span>
+                                <span class="tech-value" id="ma5">--</span>
+                            </div>
+                            <div class="tech-metric">
+                                <span class="tech-label">MA10</span>
+                                <span class="tech-value" id="ma10">--</span>
+                            </div>
+                            <div class="tech-metric">
+                                <span class="tech-label">MA20</span>
+                                <span class="tech-value" id="ma20">--</span>
+                            </div>
+                            <div class="tech-metric">
+                                <span class="tech-label">MA60</span>
+                                <span class="tech-value" id="ma60">--</span>
+                            </div>
+                            <div class="tech-metric">
+                                <span class="tech-label">MA120</span>
+                                <span class="tech-value" id="ma120">--</span>
+                            </div>
+                            <div class="tech-metric">
+                                <span class="tech-label">MA250</span>
+                                <span class="tech-value" id="ma250">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Support & Resistance -->
+                    <div class="support-resistance">
+                        <h3><i class="fas fa-arrows-alt-v"></i> 支撑与阻力</h3>
+                        <div class="sr-metrics">
+                            <div class="sr-metric">
+                                <span class="sr-label">支撑位</span>
+                                <span class="sr-value" id="supportLevels">--</span>
+                            </div>
+                            <div class="sr-metric">
+                                <span class="sr-label">阻力位</span>
+                                <span class="sr-value" id="resistanceLevels">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Fund Flow - Optimized Layout -->
+                    <div class="fund-flow-optimized">
+                        <div class="section-header">
+                            <h3><i class="fas fa-exchange-alt"></i> 资金流向</h3>
+                            <div class="auto-refresh">
+                                <span class="refresh-indicator" id="flowRefreshIndicator">●</span>
+                                <span class="refresh-text">自动刷新</span>
+                            </div>
+                        </div>
+                        
+                        <!-- 第一行：买/卖比率 + 压力指数 + 流速 -->
+                        <div class="flow-row-1">
+                            <!-- 买/卖比率 -->
+                            <div class="flow-card buy-sell-ratio-card">
+                                <div class="card-header">
+                                    <span class="card-title">买/卖 比率</span>
+                                    <span class="card-badge" id="ratioBadge">平衡</span>
+                                </div>
+                                <div class="ratio-bar-container">
+                                    <div class="ratio-bar">
+                                        <div class="ratio-segment buy" id="buySegment" style="width: 50%;"></div>
+                                        <div class="ratio-segment sell" id="sellSegment" style="width: 50%;"></div>
+                                    </div>
+                                    <div class="ratio-values">
+                                        <div class="ratio-item buy">
+                                            <span class="ratio-label">买盘</span>
+                                            <span class="ratio-value" id="buyValue">50%</span>
+                                        </div>
+                                        <div class="ratio-item sell">
+                                            <span class="ratio-label">卖盘</span>
+                                            <span class="ratio-value" id="sellValue">50%</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="ratio-summary">
+                                    <span class="ratio-dominant" id="ratioDominant">平衡</span>
+                                    <span class="ratio-strength" id="ratioStrength">中</span>
+                                </div>
+                            </div>
+                            
+                            <!-- 压力指数 -->
+                            <div class="flow-card pressure-gauge-card">
+                                <div class="card-header">
+                                    <span class="card-title">压力指数</span>
+                                    <span class="card-badge" id="pressureBadge">--</span>
+                                </div>
+                                <div class="gauge-container">
+                                    <svg class="gauge-svg" viewBox="0 0 200 120" xmlns="http://www.w3.org/2000/svg">
+                                        <path class="gauge-bg" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#e2e8f0" stroke-width="12" stroke-linecap="round"/>
+                                        <path class="gauge-active" id="pressureArc" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke-width="12" stroke-linecap="round" stroke-dasharray="251.2" stroke-dashoffset="125.6"/>
+                                        <text id="pressureValueText" x="100" y="90" text-anchor="middle" class="gauge-value-text">--</text>
+                                        <text id="pressureLevelText" x="100" y="110" text-anchor="middle" class="gauge-level-text">--</text>
+                                    </svg>
+                                </div>
+                                <div class="gauge-labels">
+                                    <span class="gauge-label-left">
+                                        <svg width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="4" fill="#f87171"/></svg>
+                                        卖压
+                                    </span>
+                                    <span class="gauge-label-right">
+                                        买压
+                                        <svg width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="4" fill="#ef4444"/></svg>
+                                    </span>
+                                </div>
+                            </div>
+                            
+                            <!-- 流速 -->
+                            <div class="flow-card speed-card">
+                                <div class="card-header">
+                                    <span class="card-title">流速</span>
+                                    <span class="card-badge" id="speedBadge">--</span>
+                                </div>
+                                <div class="speed-container">
+                                    <div class="speed-value" id="flowSpeed">--</div>
+                                    <div class="speed-bar">
+                                        <div class="speed-fill" id="speedFill" style="width: 50%;"></div>
+                                    </div>
+                                    <div class="speed-detail">
+                                        <span class="speed-label">每分钟</span>
+                                        <span class="speed-unit">万元</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- 第二行：外盘/内盘 + 成交量 + 平均每手 -->
+                        <div class="flow-row-2">
+                            <div class="flow-metric">
+                                <span class="flow-label">外盘 (买)</span>
+                                <span class="flow-value" id="flowOuter">--</span>
+                            </div>
+                            <div class="flow-metric">
+                                <span class="flow-label">内盘 (卖)</span>
+                                <span class="flow-value" id="flowInner">--</span>
+                            </div>
+                            <div class="flow-metric">
+                                <span class="flow-label">内外比</span>
+                                <span class="flow-value" id="flowRatio">--</span>
+                            </div>
+                            <div class="flow-metric">
+                                <span class="flow-label">流向</span>
+                                <span class="flow-value" id="flowDirection">--</span>
+                            </div>
+                            <div class="flow-metric">
+                                <span class="flow-label">成交量</span>
+                                <span class="flow-value" id="tradeCount">--</span>
+                            </div>
+                            <div class="flow-metric">
+                                <span class="flow-label">平均每手</span>
+                                <span class="flow-value" id="avgAmount">--</span>
+                            </div>
+                        </div>
+                        
+                        <!-- ATR 动态止损/止盈 -->
+                        <div class="atr-display">
+                            <h3><i class="fas fa-chart-line"></i> ATR 动态止损/止盈</h3>
+                            <div class="atr-container">
+                                <div class="atr-item stop-loss">
+                                    <div class="atr-label">
+                                        <span class="atr-icon">🛡️</span>
+                                        <span class="atr-title">动态止损</span>
+                                    </div>
+                                    <div class="atr-value" id="atrStopLoss">--</div>
+                                    <div class="atr-pct" id="atrStopLossPct">--</div>
+                                </div>
+                                <div class="atr-item take-profit">
+                                    <div class="atr-label">
+                                        <span class="atr-icon">🎯</span>
+                                        <span class="atr-title">动态止盈</span>
+                                    </div>
+                                    <div class="atr-value" id="atrTakeProfit">--</div>
+                                    <div class="atr-pct" id="atrTakeProfitPct">--</div>
+                                </div>
+                            </div>
+                            <div class="atr-support-resistance">
+                                <div class="atr-support" id="atrSupport">
+                                    <span class="atr-label">支撑</span>
+                                    <span class="atr-value" id="atrSupportValue">--</span>
+                                </div>
+                                <div class="atr-resistance" id="atrResistance">
+                                    <span class="atr-label">压力</span>
+                                    <span class="atr-value" id="atrResistanceValue">--</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Large/Medium/Small Orders -->
+                    <div class="order-distribution">
+                        <h3><i class="fas fa-balance-scale"></i> 大中小单分布</h3>
+                        <div class="order-bars">
+                            <div class="order-bar">
+                                <span class="order-label">大单</span>
+                                <div class="dist-bar progress-bar-large" id="largeDist" style="width: 0%;">
+                                    <div class="progress-fill"></div>
+                                </div>
+                                <span class="dist-bar-value" id="largeValue">0%</span>
+                            </div>
+                            <div class="order-bar">
+                                <span class="order-label">中单</span>
+                                <div class="dist-bar progress-bar-medium" id="mediumDist" style="width: 0%;">
+                                    <div class="progress-fill"></div>
+                                </div>
+                                <span class="dist-bar-value" id="mediumValue">0%</span>
+                            </div>
+                            <div class="order-bar">
+                                <span class="order-label">小单</span>
+                                <div class="dist-bar progress-bar-small" id="smallDist" style="width: 0%;">
+                                    <div class="progress-fill"></div>
+                                </div>
+                                <span class="dist-bar-value" id="smallValue">0%</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Chip Distribution -->
+                    <div class="chip-distribution">
+                        <h3><i class="fas fa-layer-group"></i> 筹码分布</h3>
+                        <div class="chip-bars">
+                            <div class="chip-bar">
+                                <span class="chip-label">获利盘</span>
+                                <div class="chip-bar-fill" id="chipProfit" style="width: 0%;"></div>
+                                <span class="chip-bar-value" id="chipProfitValue">0%</span>
+                            </div>
+                            <div class="chip-bar">
+                                <span class="chip-label">套牢盘</span>
+                                <div class="chip-bar-fill" id="chipTrapped" style="width: 0%;"></div>
+                                <span class="chip-bar-value" id="chipTrappedValue">0%</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Prediction -->
+                    <div class="prediction">
+                        <h3><i class="fas fa-crystal-ball"></i> 预测分析</h3>
+                        <div class="pred-metrics">
+                            <div class="pred-metric">
+                                <span class="pred-label">综合评分</span>
+                                <span class="pred-value" id="compositeScore">--</span>
+                            </div>
+                            <div class="pred-metric">
+                                <span class="pred-label">加权目标</span>
+                                <span class="pred-value" id="weightedTarget">--</span>
+                            </div>
+                            <div class="pred-metric">
+                                <span class="pred-label">上涨空间</span>
+                                <span class="pred-value" id="wtUpside">--</span>
+                            </div>
+                            <div class="pred-metric">
+                                <span class="pred-label">乐观目标</span>
+                                <span class="pred-value" id="optimisticTarget">--</span>
+                            </div>
+                            <div class="pred-metric">
+                                <span class="pred-label">中性目标</span>
+                                <span class="pred-value" id="neutralTarget">--</span>
+                            </div>
+                            <div class="pred-metric">
+                                <span class="pred-label">悲观目标</span>
+                                <span class="pred-value" id="pessimisticTarget">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ML Model Details -->
+                    <div class="ml-details">
+                        <h3><i class="fas fa-robot"></i> 机器学习模型</h3>
+                        <div class="ml-metrics">
+                            <div class="ml-metric">
+                                <span class="ml-label">模型状态</span>
+                                <span class="ml-value" id="mlStatus">--</span>
+                            </div>
+                            <div class="ml-metric">
+                                <span class="ml-label">预测方向</span>
+                                <span class="ml-value" id="mlDirection">--</span>
+                            </div>
+                            <div class="ml-metric">
+                                <span class="ml-label">ML 置信度</span>
+                                <span class="ml-value" id="mlConfidence">--</span>
+                            </div>
+                            <div class="ml-metric">
+                                <span class="ml-label">CV 准确率</span>
+                                <span class="ml-value" id="mlCVScore">--</span>
+                            </div>
+                            <div class="ml-metric" style="grid-column: 1 / -1;">
+                                <span class="ml-label">概率分布</span>
+                                <div class="ml-prob-bar" id="mlProbBar">
+                                    <div class="ml-prob-up" id="mlProbUp" style="width: 33%;"></div>
+                                    <div class="ml-prob-neutral" id="mlProbNeutral" style="width: 34%;"></div>
+                                    <div class="ml-prob-down" id="mlProbDown" style="width: 33%;"></div>
+                                </div>
+                                <div class="ml-prob-labels">
+                                    <span id="mlProbUpLabel">涨 33%</span>
+                                    <span id="mlProbNeutralLabel">中 34%</span>
+                                    <span id="mlProbDownLabel">跌 33%</span>
+                                </div>
+                            </div>
+                            <div class="ml-metric" style="grid-column: 1 / -1;">
+                                <span class="ml-label">Top 特征重要性</span>
+                                <div id="mlFeatureImportance" class="ml-features">
+                                    <span class="ml-feature-item">--</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- K-line Signals -->
+                    <div class="kline-signals">
+                        <h3><i class="fas fa-chart-area"></i> K线信号</h3>
+                        <div class="signal-columns">
+                            <div class="signal-column">
+                                <h4>看涨信号</h4>
+                                <div id="bullishSignals" class="signal-list">
+                                    <div class="signal-item">--</div>
+                                </div>
+                            </div>
+                            <div class="signal-column">
+                                <h4>看跌信号</h4>
+                                <div id="bearishSignals" class="signal-list">
+                                    <div class="signal-item">--</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Trend & RSI -->
+                    <div class="trend-rsi">
+                        <h3><i class="fas fa-tachometer-alt"></i> 趋势与 RSI</h3>
+                        <div class="trend-metrics">
+                            <div class="trend-metric">
+                                <span class="trend-label">整体趋势</span>
+                                <span class="trend-value" id="overallTrend">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">趋势强度</span>
+                                <span class="trend-value" id="trendBadge">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">价格位置</span>
+                                <span class="trend-value" id="pricePosition">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">RSI</span>
+                                <div class="rsi-container">
+                                    <div class="rsi-fill" id="rsiFill" style="width: 50%;"></div>
+                                </div>
+                                <span class="rsi-value" id="rsiValue">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">RSI 信号</span>
+                                <span class="rsi-value" id="rsiSignal">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">RSI 操作</span>
+                                <span class="rsi-value" id="rsiAction">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">日 RSI</span>
+                                <span class="rsi-value" id="dailyRsi">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">周 RSI</span>
+                                <span class="rsi-value" id="weeklyRsi">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">月 RSI</span>
+                                <span class="rsi-value" id="monthlyRsi">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">日趋势</span>
+                                <span class="trend-value" id="dailyTrend">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">周趋势</span>
+                                <span class="trend-value" id="weeklyTrend">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">月趋势</span>
+                                <span class="trend-value" id="monthlyTrend">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">共振类型</span>
+                                <span class="trend-value" id="resonanceType">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">共振方向</span>
+                                <span class="trend-value" id="resonanceDirection">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">形态评分</span>
+                                <span class="trend-value" id="patternScore">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">持仓评分</span>
+                                <span class="trend-value" id="positionScore">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">成交量评分</span>
+                                <span class="trend-value" id="volumeScore">--</span>
+                            </div>
+                            <div class="trend-metric">
+                                <span class="trend-label">综合评分</span>
+                                <div class="score-circle" id="scoreCircle">
+                                    <span class="score-text" id="scoreText">--</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="websocket" class="section">
+                <div class="section-header">
+                    <h2><i class="fas fa-broadcast-tower"></i> 实时数据流</h2>
+                </div>
+                <div class="websocket-content">
+                    <div class="websocket-status">
+                        <span class="status-dot" id="wsDot"></span>
+                        <span id="wsStatus">WebSocket 连接中...</span>
+                    </div>
+                    <div class="websocket-data">
+                        <div class="ws-item">
+                            <span class="ws-label">价格</span>
+                            <span class="ws-value" id="wsPrice">--</span>
+                        </div>
+                        <div class="ws-item">
+                            <span class="ws-label">价格变化</span>
+                            <span class="ws-value" id="wsPriceChange">--</span>
+                        </div>
+                        <div class="ws-item">
+                            <span class="ws-label">成交量</span>
+                            <span class="ws-value" id="wsVolume">--</span>
+                        </div>
+                        <div class="ws-item">
+                            <span class="ws-label">流速</span>
+                            <span class="ws-value" id="wsSpeed">--</span>
+                        </div>
+                        <div class="ws-item">
+                            <span class="ws-label">最新提醒</span>
+                            <span class="ws-value" id="wsText">--</span>
+                        </div>
+                    </div>
+                    <div class="alert-list" id="wsAlertList">
+                        <div class="loading">等待数据...</div>
+                    </div>
+                </div>
+            </section>
+
+
+            <section id="alerts" class="section">
+                <div class="section-header">
+                    <h2><i class="fas fa-bell"></i> 实时提醒</h2>
+                </div>
+                <div id="alertsContainer" class="alerts-container">
+                    <div class="alert-status">
+                        <span class="status-dot" id="alert-wsDot"></span>
+                        <span id="alert-wsStatus">WebSocket 连接中...</span>
+                    </div>
+                    <div class="alert-summary" id="alertSummary">
+                        <div class="alert-summary-item">
+                            <div class="alert-summary-value">0</div>
+                            <div class="alert-summary-label">总异动数</div>
+                        </div>
+                        <div class="alert-summary-item">
+                            <div class="alert-summary-value">0</div>
+                            <div class="alert-summary-label">5 分钟内</div>
+                        </div>
+                        <div class="alert-summary-item">
+                            <div class="alert-summary-value">0</div>
+                            <div class="alert-summary-label">15 分钟内</div>
+                        </div>
+                        <div class="alert-summary-item">
+                            <div class="alert-summary-value">0</div>
+                            <div class="alert-summary-label">高严重度</div>
+                        </div>
+                    </div>
+                    <div class="alert-list" id="alertHistory">
+                        <div style="text-align:center;padding:20px;color:#94a3b8">加载中...</div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="heatmap" class="section">
+                <div class="section-header">
+                    <h2><i class="fas fa-th"></i> 资金流向热力图</h2>
+                </div>
+                <div id="heatmapContainer" class="heatmap-container">
+                    <div id="industryHeatmap" class="heatmap-grid">
+                        <div class="loading">正在加载热力图...</div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="report" class="section">
+                <div class="section-header">
+                    <h2><i class="fas fa-file-alt"></i> 分析报告</h2>
+                    <button class="btn btn-primary" onclick="downloadReport()">
+                        <i class="fas fa-download"></i> 下载报告
+                    </button>
+                </div>
+                <div id="reportContent" class="report-content">
+                    <div class="loading">正在生成报告...</div>
+                </div>
+            </section>
+
+            <!-- ═══════════ 回测报告 ═══════════ -->
+            <section id="backtest" class="section">
+                <div class="section-header">
+                    <h2><i class="fas fa-chart-bar"></i> Walk-Forward 回测报告</h2>
+                    <button class="btn btn-primary" onclick="runBacktest()">
+                        <i class="fas fa-play"></i> 运行回测
+                    </button>
+                </div>
+
+                <div class="backtest-grid">
+                    <!-- 汇总指标 -->
+                    <div class="card">
+                        <h3>回测汇总</h3>
+                        <div class="stat-grid">
+                            <div class="stat-item">
+                                <span class="stat-label">总收益</span>
+                                <span class="stat-value" id="bt_total_return">--</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Sharpe</span>
+                                <span class="stat-value" id="bt_sharpe">--</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">最大回撤</span>
+                                <span class="stat-value" id="bt_maxdd">--</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">胜率</span>
+                                <span class="stat-value" id="bt_winrate">--</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">盈利窗口</span>
+                                <span class="stat-value" id="bt_consistent">--</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">蒙特卡洛盈利概率</span>
+                                <span class="stat-value" id="bt_mc_prob">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 中文总结 -->
+                    <div class="card" id="bt_chinese_summary_card" style="display:none; grid-column: 1 / -1;">
+                        <h3><i class="fas fa-comment-dots"></i> 回测总结</h3>
+                        <div id="bt_chinese_summary" class="chinese-summary">
+                        </div>
+                    </div>
+
+                    <!-- Walk-Forward 窗口结果 -->
+                    <div class="card">
+                        <h3>Walk-Forward 窗口结果</h3>
+                        <div id="bt_windows" class="backtest-windows">
+                            <div class="loading">点击"运行回测"开始</div>
+                        </div>
+                    </div>
+
+                    <!-- Monte Carlo 分布 -->
+                    <div class="card">
+                        <h3>Monte Carlo 模拟分布</h3>
+                        <div class="mc-stats">
+                            <div class="mc-stat">
+                                <span class="mc-label">均值</span>
+                                <span class="mc-value" id="mc_mean">--</span>
+                            </div>
+                            <div class="mc-stat">
+                                <span class="mc-label">中位数</span>
+                                <span class="mc-value" id="mc_median">--</span>
+                            </div>
+                            <div class="mc-stat">
+                                <span class="mc-label">P5</span>
+                                <span class="mc-value" id="mc_p5">--</span>
+                            </div>
+                            <div class="mc-stat">
+                                <span class="mc-label">P95</span>
+                                <span class="mc-value" id="mc_p95">--</span>
+                            </div>
+                            <div class="mc-stat">
+                                <span class="mc-label">盈利概率</span>
+                                <span class="mc-value" id="mc_prob">--</span>
+                            </div>
+                        </div>
+                        <div id="mc_histogram" class="mc-histogram">
+                            <div class="loading">等待模拟结果...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ═══════════ 组合优化 ═══════════ -->
+            <section id="portfolio" class="section">
+                <div class="section-header">
+                    <h2><i class="fas fa-balance-scale"></i> 组合优化</h2>
+                    <button class="btn btn-primary" onclick="runPortfolioOptimize()">
+                        <i class="fas fa-calculator"></i> 计算优化
+                    </button>
+                </div>
+
+                <div class="portfolio-grid">
+                    <!-- Black-Litterman -->
+                    <div class="card">
+                        <h3>Black-Litterman 权重</h3>
+                        <div id="bl_weights" class="bl-weights">
+                            <div class="loading">点击"计算优化"开始</div>
+                        </div>
+                    </div>
+
+                    <!-- 风险平价 -->
+                    <div class="card">
+                        <h3>风险平价权重</h3>
+                        <div id="rp_weights" class="rp-weights">
+                            <div class="loading">等待计算结果...</div>
+                        </div>
+                    </div>
+
+                    <!-- 对比图 -->
+                    <div class="card">
+                        <h3>权重对比</h3>
+                        <div id="weight_comparison" class="weight-comparison">
+                            <div class="loading">等待计算结果...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ═══════════ 因子分析 ═══════════ -->
+            <section id="factors" class="section">
+                <div class="section-header">
+                    <h2><i class="fas fa-sliders-h"></i> 因子分析</h2>
+                    <button class="btn btn-primary" onclick="runFactorAnalysis()">
+                        <i class="fas fa-chart-pie"></i> 分析因子
+                    </button>
+                </div>
+
+                <div class="factors-grid">
+                    <!-- 原始评分 -->
+                    <div class="card">
+                        <h3>原始因子评分</h3>
+                        <div id="raw_scores" class="factor-bars">
+                            <div class="loading">点击"分析因子"开始</div>
+                        </div>
+                    </div>
+
+                    <!-- 标准化评分 -->
+                    <div class="card">
+                        <h3>Z-Score 标准化评分</h3>
+                        <div id="norm_scores" class="factor-bars">
+                            <div class="loading">等待计算结果...</div>
+                        </div>
+                    </div>
+
+                    <!-- 因子暴露 -->
+                    <div class="card">
+                        <h3>因子暴露 (偏离均值)</h3>
+                        <div id="factor_exposure" class="factor-bars">
+                            <div class="loading">等待计算结果...</div>
+                        </div>
+                    </div>
+
+                    <!-- 综合评级 -->
+                    <div class="card">
+                        <h3>综合评级</h3>
+                        <div id="factor_rating" class="factor-rating">
+                            <div class="loading">等待计算结果...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ═══════════ 量化模型 ═══════════ -->
+            <section id="quant-model" class="section">
+                <div class="section-header">
+                    <h2><i class="fas fa-microchip"></i> 量化模型</h2>
+                    <div class="section-actions">
+                        <input type="text" id="quantStockCode" placeholder="股票代码" value="sz300620"
+                               style="padding: 8px 12px; border: 1px solid var(--border-color); border-radius: 6px; width: 140px;">
+                        <button class="btn btn-primary" onclick="refreshQuantModel()">
+                            <i class="fas fa-sync"></i> 刷新
+                        </button>
+                    </div>
+                </div>
+
+                <div class="quant-model-grid">
+                    <!-- 因子仪表盘 -->
+                    <div class="qm-panel">
+                        <h3><i class="fas fa-chart-bar"></i> 因子仪表盘</h3>
+                        <div id="factor-dashboard" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+
+                    <!-- ML 预测 -->
+                    <div class="qm-panel">
+                        <h3><i class="fas fa-brain"></i> ML 预测</h3>
+                        <div id="ml-prediction-panel" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+
+                    <!-- 模型健康 & 版本 -->
+                    <div class="qm-panel">
+                        <h3><i class="fas fa-microchip"></i> 模型健康 & 版本</h3>
+                        <div id="health-panel" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+
+                    <!-- 数据质量 -->
+                    <div class="qm-panel">
+                        <h3><i class="fas fa-database"></i> 数据质量</h3>
+                        <div id="quality-panel" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+
+                    <!-- 因子 IC -->
+                    <div class="qm-panel">
+                        <h3><i class="fas fa-chart-line"></i> 因子 IC/ICIR</h3>
+                        <div id="factor-ic-panel" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+
+                    <!-- 因子质量 -->
+                    <div class="qm-panel">
+                        <h3><i class="fas fa-flask"></i> 因子质量</h3>
+                        <div id="factor-quality-panel" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+
+                    <!-- 风险报告 -->
+                    <div class="qm-panel">
+                        <h3><i class="fas fa-shield-halved"></i> 风险报告</h3>
+                        <div id="risk-panel" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+
+                    <!-- 回测结果 -->
+                    <div class="qm-panel">
+                        <h3><i class="fas fa-chart-area"></i> 回测结果</h3>
+                        <div id="backtest-panel" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+
+                    <!-- 情感分析 -->
+                    <div class="qm-panel">
+                        <h3><i class="fas fa-comment-dots"></i> 情感分析</h3>
+                        <div id="sentiment-panel" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+
+                    <!-- 超参优化 -->
+                    <div class="qm-panel">
+                        <h3><i class="fas fa-sliders"></i> 超参优化</h3>
+                        <div id="hyperparams-panel" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+
+                    <!-- 深度学习 V2 -->
+                    <div class="qm-panel" style="grid-column: span 2;">
+                        <h3><i class="fas fa-brain"></i> 深度学习 V2 (Transformer-LSTM + RL + FinBERT)</h3>
+                        <div id="dl-v2-panel" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="sota" class="section">
+                <div class="section-header">
+                    <h2><i class="fas fa-robot"></i> SOTA 量化模型</h2>
+                    <p>整合 TradingAgents + AlphaCrafter + FCMR + Trading-R1 最新研究成果</p>
+                </div>
+                <div class="quant-model-grid">
+                    <!-- SOTA 综合决策 -->
+                    <div class="qm-panel">
+                        <h3><i class="fas fa-brain"></i> SOTA 综合决策</h3>
+                        <div id="sota-decision" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+                    <!-- 因子挖掘 -->
+                    <div class="qm-panel">
+                        <h3><i class="fas fa-gem"></i> 因子挖掘</h3>
+                        <div id="sota-factors" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+                    <!-- 多模态分析 -->
+                    <div class="qm-panel">
+                        <h3><i class="fas fa-layer-group"></i> 多模态分析</h3>
+                        <div id="sota-cross-modal" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+                    <!-- 引擎状态 -->
+                    <div class="qm-panel">
+                        <h3><i class="fas fa-server"></i> 引擎状态</h3>
+                        <div id="sota-status" class="qm-content">
+                            <div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <div class="loading-text">加载中...</div>
+    </div>
+
+    <script src="/static/js/app.js?v=14"></script>
+    <script src="/static/js/dashboard.js?v=6"></script>
+    <script>
+    // SOTA 模型相关函数
+    function loadSOTADashboard() {
+        // 加载 SOTA 综合决策
+        fetch('/api/sota/decision/sz300620')
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    const d = data.decision;
+                    document.getElementById('sota-decision').innerHTML = `
+                        <div class="sota-decision-card">
+                            <div class="sota-direction ${d.ensemble_direction}">
+                                <i class="fas fa-arrow-${d.ensemble_direction === 'bullish' ? 'up' : d.ensemble_direction === 'bearish' ? 'down' : 'right'}"></i>
+                                <h4>${d.ensemble_direction === 'bullish' ? '看涨' : d.ensemble_direction === 'bearish' ? '看跌' : '中性'}</h4>
+                            </div>
+                            <div class="sota-metrics">
+                                <div class="metric"><span>综合得分</span><span>${d.ensemble_score.toFixed(3)}</span></div>
+                                <div class="metric"><span>LLM 决策</span><span>${d.llm?.research_direction || 'N/A'}</span></div>
+                                <div class="metric"><span>RL 动作</span><span>${d.rl_action}</span></div>
+                                <div class="metric"><span>RL 置信度</span><span>${(d.rl_confidence * 100).toFixed(1)}%</span></div>
+                                <div class="metric"><span>执行时间</span><span>${d.execution_time_ms.toFixed(1)}ms</span></div>
+                            </div>
+                        </div>
+                    `;
+                }
+            })
+            .catch(e => console.error('SOTA decision error:', e));
+
+        // 加载因子挖掘
+        fetch('/api/sota/factors?stock_code=sz300620')
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    const factors = data.factors.map(f => 
+                        `<div class="factor-item"><span>${f.name}</span><span>${f.efficacy.toFixed(4)}</span></div>`
+                    ).join('');
+                    document.getElementById('sota-factors').innerHTML = `
+                        <div class="factors-list">${factors}</div>
+                        <p class="factor-count">共 ${data.factor_count} 个因子</p>
+                    `;
+                }
+            })
+            .catch(e => console.error('SOTA factors error:', e));
+
+        // 加载多模态分析
+        fetch('/api/sota/cross-modal?stock_code=sz300620')
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    const cm = data.analysis;
+                    document.getElementById('sota-cross-modal').innerHTML = `
+                        <div class="cross-modal-card">
+                            <div class="cm-layer"><span>文本层</span><span>${cm.text_score?.toFixed(2) || 'N/A'}</span></div>
+                            <div class="cm-layer"><span>数值层</span><span>${cm.numeric_score?.toFixed(2) || 'N/A'}</span></div>
+                            <div class="cm-layer"><span>一致性</span><span>${cm.consistency_score?.toFixed(2) || 'N/A'}</span></div>
+                        </div>
+                    `;
+                }
+            })
+            .catch(e => console.error('SOTA cross-modal error:', e));
+
+        // 加载引擎状态
+        fetch('/api/sota/status')
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    const engine = data.engine;
+                    document.getElementById('sota-status').innerHTML = `
+                        <div class="status-grid">
+                            <div class="status-item"><span>LLM 客户端</span><span class="status-ok">${engine.llm_client}</span></div>
+                            <div class="status-item"><span>Agent 协调器</span><span class="status-ok">${engine.agent_coordinator}</span></div>
+                            <div class="status-item"><span>因子挖掘</span><span class="status-ok">${engine.factor_mining}</span></div>
+                            <div class="status-item"><span>多模态引擎</span><span class="status-ok">${engine.multi_modal}</span></div>
+                            <div class="status-item"><span>RL 执行器</span><span class="status-ok">${engine.rl_executor}</span></div>
+                            <div class="status-item"><span>缓存大小</span><span>${data.cache_size}</span></div>
+                        </div>
+                    `;
+                }
+            })
+            .catch(e => console.error('SOTA status error:', e));
+    }
+
+    // 修改 showSection 函数以支持 SOTA
+    const originalShowSection = window.showSection;
+    if (originalShowSection) {
+        window.showSection = function(section) {
+            originalShowSection(section);
+            if (section === 'sota') {
+                loadSOTADashboard();
+            }
+        };
+    } else {
+        window.showSection = function(section) {
+            document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+            const target = document.getElementById(section);
+            if (target) target.classList.add('active');
+            if (section === 'sota') loadSOTADashboard();
+        };
+    }
+    </script>
+</body>
+</html>
+
+

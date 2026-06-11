@@ -1,0 +1,217 @@
+"""
+Stock Analyzer - Main Flask Application
+Web-based stock analysis system with real-time data and report generation
+"""
+
+import os
+import sys
+import json
+import time
+from datetime import datetime
+from flask import Flask, render_template, request, jsonify, send_file
+from flask_socketio import SocketIO
+from flask_cors import CORS
+
+# Add current directory to path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from modules.data_fetcher import StockDataFetcher
+from modules.analysis_engine import AnalysisEngine
+from modules.report_generator import ReportGenerator
+from modules.strategy_engine import StrategyEngine
+from modules.kline_signal_analyzer import KlineSignalAnalyzer
+from modules.websocket_handler import WebSocketFundFlowHandler
+from modules.heatmap_generator import HeatmapGenerator
+from modules.alert_engine import AlertEngine
+
+# Initialize Flask app
+app = Flask(__name__, 
+            template_folder='templates',
+            static_folder='static')
+CORS(app)
+
+# Initialize modules
+data_fetcher = StockDataFetcher()
+analysis_engine = AnalysisEngine()
+report_generator = ReportGenerator()
+strategy_engine = StrategyEngine()
+kline_analyzer = KlineSignalAnalyzer()
+socketio = SocketIO(app, cors_allowed_origins="*")
+websocket_handler = WebSocketFundFlowHandler(socketio)
+heatmap_generator = HeatmapGenerator()
+alert_engine = AlertEngine()
+
+# Default stock configuration
+DEFAULT_STOCK = {
+    'code': 'sz300620',
+    'name': '光库科技',
+    'industry': '光通信',
+    'cost_basis': 120
+}
+
+# Data cache
+data_cache = {}
+CACHE_TTL = 60  # seconds
+
+
+def get_stock_data(stock_code: str = None) -> dict:
+    """Get stock data with caching"""
+    code = stock_code or DEFAULT_STOCK['code']
+    cache_key = f"stock_{code}"
+    
+    if cache_key in data_cache and time.time() - data_cache[cache_key]['time'] < CACHE_TTL:
+        return data_cache[cache_key]['data']
+    
+    stock_data = data_fetcher.get_stock_info(code)
+    if stock_data:
+        data_cache[cache_key] = {'data': stock_data, 'time': time.time()}
+    
+    return stock_data
+
+
+@app.route('/')
+def index():
+    """Main dashboard page"""
+    return render_template('index.html')
+
+
+@app.route('/api/stock/<stock_code>')
+def api_get_stock(stock_code):
+    """Get stock data API"""
+    stock_data = get_stock_data(stock_code)
+    if stock_data:
+        return jsonify({
+            'success': True,
+            'data': stock_data,
+            'timestamp': datetime.now().isoformat()
+        })
+    return jsonify({'success': False, 'error': 'Failed to fetch stock data'}), 500
+
+
+@app.route('/api/analyze/<stock_code>')
+def api_analyze_stock(stock_code):
+    """Get comprehensive analysis"""
+    stock_data = get_stock_data(stock_code)
+    if not stock_data:
+        return jsonify({'success': False, 'error': 'Failed to fetch stock data'}), 500
+    
+    industry = DEFAULT_STOCK.get('industry', '光通信')
+    cost_basis = request.args.get('cost_basis', DEFAULT_STOCK['cost_basis'], type=float)
+    
+    # Perform analysis
+    analysis = analysis_engine.comprehensive_analysis(stock_data, industry, cost_basis)
+    
+    # Generate strategies
+    strategies = strategy_engine.generate_strategy_recommendation(
+        stock_data, analysis, cost_basis
+    )
+    
+    # 启动模拟告警生成
+    alert_engine.start_mock_alert_generation(stock_code, interval=15)
+    
+    # K线信号分析
+    kline_signals = kline_analyzer.generate_kline_signals(stock_data)
+    
+    # Generate report
+    report = report_generator.generate_report(analysis)
+    
+    # Save report to file
+    report_filename = f"report_{stock_code}_{int(time.time())}.md"
+    report_path = os.path.join('data', report_filename)
+    os.makedirs('data', exist_ok=True)
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write(report)
+    
+    return jsonify({
+        'success': True,
+        'analysis': analysis,
+        'strategies': strategies,
+        'kline_signals': kline_signals,
+        'report': report,
+        'report_file': report_filename,
+        'timestamp': datetime.now().isoformat()
+    })
+
+
+@app.route('/api/download_report/<report_file>')
+def api_download_report(report_file):
+    """Download report as markdown file"""
+    report_path = os.path.join('data', report_file)
+    if os.path.exists(report_path):
+        return send_file(report_path, as_attachment=True)
+    return jsonify({'success': False, 'error': 'Report not found'}), 404
+
+
+@app.route('/api/health')
+def api_health():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'uptime': time.time()
+    })
+
+
+@app.route('/api/preset/<preset_name>')
+def api_get_preset(preset_name):
+    """Get preset stock configuration"""
+    presets = {
+        'guangku': {
+            'code': 'sz300620',
+            'name': '光库科技',
+            'industry': '光通信',
+            'cost_basis': 120
+        },
+        'huawei': {
+            'code': 'sh600000',
+            'name': '招商银行',
+            'industry': '银行',
+            'cost_basis': 35
+        }
+    }
+    return jsonify(presets.get(preset_name, {}))
+
+@app.route('/api/heatmap')
+def api_get_heatmap():
+    """Get fund flow heatmap"""
+    heatmap = heatmap_generator.generate_industry_heatmap()
+    return jsonify({'success': True, 'data': heatmap})
+
+@app.route('/api/alerts/<stock_code>')
+def api_get_alerts(stock_code):
+    """Get fund flow alerts"""
+    alerts = alert_engine.get_recent_alerts(stock_code)
+    summary = alert_engine.get_alert_summary(stock_code)
+    return jsonify({'success': True, 'alerts': alerts, 'summary': summary})
+
+@socketio.on('connect')
+def handle_connect():
+    """Handle WebSocket connection"""
+    print(f"Client connected: {request.sid}")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Handle WebSocket disconnection"""
+    print(f"Client disconnected: {request.sid}")
+
+@socketio.on('subscribe_stock')
+def handle_subscribe(data):
+    """Subscribe to stock updates"""
+    stock_code = data.get('stock_code', 'sz300620')
+    websocket_handler.register_client(request.sid, stock_code)
+    websocket_handler.start_periodic_update(stock_code)
+
+@socketio.on('unsubscribe_stock')
+def handle_unsubscribe(data):
+    """Unsubscribe from stock updates"""
+    websocket_handler.unregister_client(request.sid)
+
+
+if __name__ == '__main__':
+    print("=" * 60)
+    print("  Stock Analyzer System Starting...")
+    print("=" * 60)
+    print(f"  Server: http://localhost:5000")
+    print(f"  API: http://localhost:5000/api/stock/sz300620")
+    print("=" * 60)
+    app.run(host='0.0.0.0', port=5002, debug=False)

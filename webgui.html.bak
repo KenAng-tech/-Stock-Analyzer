@@ -1,0 +1,981 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>江特电机 - 智能股票分析系统</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0a0e27;
+            --bg-secondary: #1a1f3a;
+            --bg-card: #1e2444;
+            --text-primary: #e8eaf6;
+            --text-secondary: #9fa8da;
+            --accent-green: #00e676;
+            --accent-red: #ff5252;
+            --accent-blue: #448aff;
+            --accent-yellow: #ffd740;
+            --border-color: #2d3561;
+        }
+        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #1a1f3a 0%, #2d3561 100%);
+            padding: 20px 40px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .header h1 {
+            font-size: 28px;
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-green));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .header .subtitle {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-top: 4px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+        
+        .grid {
+            display: grid;
+            gap: 20px;
+        }
+        
+        .grid-4 { grid-template-columns: repeat(4, 1fr); }
+        .grid-3 { grid-template-columns: repeat(3, 1fr); }
+        .grid-2 { grid-template-columns: repeat(2, 1fr); }
+        
+        @media (max-width: 1200px) {
+            .grid-4 { grid-template-columns: repeat(2, 1fr); }
+            .grid-3 { grid-template-columns: repeat(2, 1fr); }
+        }
+        
+        @media (max-width: 768px) {
+            .grid-4, .grid-3, .grid-2 { grid-template-columns: 1fr; }
+        }
+        
+        .card {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid var(--border-color);
+            transition: transform 0.2s;
+        }
+        
+        .card:hover { transform: translateY(-2px); }
+        
+        .card-title {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .card-value {
+            font-size: 28px;
+            font-weight: 700;
+        }
+        
+        .card-subtitle {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+        
+        .positive { color: var(--accent-green); }
+        .negative { color: var(--accent-red); }
+        
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .metric-label { color: var(--text-secondary); }
+        .metric-value { font-weight: 600; }
+        
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        
+        .badge-green { background: rgba(0, 230, 118, 0.15); color: var(--accent-green); }
+        .badge-red { background: rgba(255, 82, 82, 0.15); color: var(--accent-red); }
+        .badge-blue { background: rgba(68, 138, 255, 0.15); color: var(--accent-blue); }
+        .badge-yellow { background: rgba(255, 215, 64, 0.15); color: var(--accent-yellow); }
+        
+        .chart-container {
+            position: relative;
+            height: 300px;
+            padding: 10px;
+        }
+        
+        .loading {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 60px;
+        }
+        
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border-color);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-bottom: 16px;
+        }
+        
+        @keyframes spin { to { transform: rotate(360deg); } }
+        
+        .price-change {
+            font-size: 16px;
+            font-weight: 600;
+        }
+        
+        .signal-list {
+            list-style: none;
+            padding: 0;
+        }
+        
+        .signal-list li {
+            padding: 6px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .signal-list li::before {
+            content: "✓ ";
+            color: var(--accent-green);
+            font-weight: bold;
+        }
+        
+        .btn {
+            padding: 10px 24px;
+            border: none;
+            border-radius: 8px;
+            background: var(--accent-blue);
+            color: white;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .btn:hover { background: #3366cc; }
+        
+        .section-title {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 16px;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .support-resistance-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        
+        .level-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .level-item:last-child { border-bottom: none; }
+        
+        .level-desc {
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+        
+        .scenario-card {
+            padding: 16px;
+            margin-bottom: 12px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+        
+        .scenario-card.optimistic { border-left: 4px solid var(--accent-green); }
+        .scenario-card.neutral { border-left: 4px solid var(--accent-blue); }
+        .scenario-card.pessimistic { border-left: 4px solid var(--accent-red); }
+        
+        .scenario-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+        
+        .scenario-name { font-weight: 700; }
+        .scenario-prob { color: var(--text-secondary); }
+        
+        .scenario-target { font-size: 16px; font-weight: 600; }
+        .scenario-signal { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+        
+        .kline-signal-item {
+            padding: 8px 12px;
+            margin-bottom: 4px;
+            border-radius: 4px;
+        }
+        
+        .kline-signal-item.bullish { background: rgba(0, 230, 118, 0.1); }
+        .kline-signal-item.bearish { background: rgba(255, 82, 82, 0.1); }
+        
+        .resonance-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            background: rgba(0, 230, 118, 0.15);
+            color: var(--accent-green);
+        }
+        
+        .rsi-gauge {
+            width: 100%;
+            height: 8px;
+            background: var(--border-color);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+        
+        .rsi-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s;
+        }
+        
+        .rsi-fill.bullish { background: var(--accent-green); }
+        .rsi-fill.bearish { background: var(--accent-red); }
+        .rsi-fill.neutral { background: var(--accent-blue); }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📈 江特电机 - 智能股票分析系统</h1>
+        <div class="subtitle">基于大数据分析的技术分析与交易策略 | 持仓成本: ¥120.00</div>
+    </div>
+    
+    <div class="container">
+        <div id="loading" class="loading">
+            <div class="spinner"></div>
+            <div>正在加载分析数据...</div>
+        </div>
+        
+        <div id="content" style="display:none;">
+            <!-- 核心指标 -->
+            <div class="grid grid-4" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">当前价格</div>
+                    <div class="card-value" id="currentPrice">--</div>
+                    <div class="card-subtitle" id="priceChange"></div>
+                </div>
+                <div class="card">
+                    <div class="card-title">持仓盈亏</div>
+                    <div class="card-value" id="positionPnl">--</div>
+                    <div class="card-subtitle">成本 ¥120.00</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">操作建议</div>
+                    <div class="card-value" id="action">--</div>
+                    <div class="card-subtitle" id="confidence"></div>
+                </div>
+                <div class="card">
+                    <div class="card-title">趋势判断</div>
+                    <div class="card-value" id="trend">--</div>
+                    <div class="card-subtitle" id="trendDesc"></div>
+                </div>
+            </div>
+            
+            <!-- 图表区域 -->
+            <div class="grid grid-2" style="margin-bottom: 20px;">
+                <div class="card" style="grid-column: span 2;">
+                    <div class="card-title">📊 价格走势与均线</div>
+                    <div class="chart-container">
+                        <canvas id="priceChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 技术指标 -->
+            <div class="grid grid-3" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">移动平均线</div>
+                    <div class="metric-row">
+                        <span class="metric-label">MA5</span>
+                        <span class="metric-value" id="ma5">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">MA10</span>
+                        <span class="metric-value" id="ma10">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">MA20</span>
+                        <span class="metric-value" id="ma20">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">MA60</span>
+                        <span class="metric-value" id="ma60">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">MA120</span>
+                        <span class="metric-value" id="ma120">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">MA250</span>
+                        <span class="metric-value" id="ma250">--</span>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-title">RSI 指标</div>
+                    <div class="metric-row">
+                        <span class="metric-label">RSI(14)</span>
+                        <span class="metric-value" id="rsi">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">状态</span>
+                        <span class="metric-value" id="rsiStatus">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">波动率</span>
+                        <span class="metric-value" id="volatility">--</span>
+                    </div>
+                    <div class="rsi-gauge">
+                        <div class="rsi-fill" id="rsiGauge"></div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-title">MACD 指标</div>
+                    <div class="metric-row">
+                        <span class="metric-label">MACD</span>
+                        <span class="metric-value" id="macd">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Signal</span>
+                        <span class="metric-value" id="macdSignal">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Histogram</span>
+                        <span class="metric-value" id="macdHist">--</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 布林带 -->
+            <div class="grid grid-2" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">🔵 布林带分析</div>
+                    <div class="metric-row">
+                        <span class="metric-label">上轨</span>
+                        <span class="metric-value" id="bollUpper">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">中轨</span>
+                        <span class="metric-value" id="bollMiddle">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">下轨</span>
+                        <span class="metric-value" id="bollLower">--</span>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-title">📈 统计指标</div>
+                    <div class="metric-row">
+                        <span class="metric-label">日均收益率</span>
+                        <span class="metric-value" id="avgReturn">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">最大单日涨幅</span>
+                        <span class="metric-value positive" id="maxGain">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">最大单日跌幅</span>
+                        <span class="metric-value negative" id="maxLoss">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">上涨天数占比</span>
+                        <span class="metric-value" id="positiveDays">--</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 基本面分析 -->
+            <div class="section-title">📊 基本面分析</div>
+            <div class="grid grid-4" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">PE 估值</div>
+                    <div class="card-value" id="pe">--</div>
+                    <div class="card-subtitle" id="peLevel">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">总市值</div>
+                    <div class="card-value" id="marketCap">--</div>
+                    <div class="card-subtitle">亿元</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">流通市值</div>
+                    <div class="card-value" id="circulatingCap">--</div>
+                    <div class="card-subtitle">亿元</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">估值水平</div>
+                    <div class="card-value" id="valuationLevel">--</div>
+                    <div class="card-subtitle">行业对比</div>
+                </div>
+            </div>
+            
+            <div class="grid grid-3" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">营收增长</div>
+                    <div class="card-value" id="revenueGrowth">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">利润增长</div>
+                    <div class="card-value" id="profitGrowth">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">毛利率</div>
+                    <div class="card-value" id="grossMargin">--</div>
+                </div>
+            </div>
+            
+            <!-- 技术分析 -->
+            <div class="section-title">📈 技术分析</div>
+            <div class="grid grid-3" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">K线形态</div>
+                    <div class="card-value" id="klinePattern">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">振幅</div>
+                    <div class="card-value" id="amplitude">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">短期趋势</div>
+                    <div class="card-value" id="shortTermTrend">--</div>
+                </div>
+            </div>
+            
+            <!-- 支撑与阻力 -->
+            <div class="section-title">🎯 支撑与阻力</div>
+            <div class="support-resistance-grid" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">支撑位</div>
+                    <div id="supportLevels"></div>
+                </div>
+                <div class="card">
+                    <div class="card-title">阻力位</div>
+                    <div id="resistanceLevels"></div>
+                </div>
+            </div>
+            
+            <!-- 资金流向 -->
+            <div class="section-title">💰 资金流向</div>
+            <div class="grid grid-4" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">外盘</div>
+                    <div class="card-value" id="outerDisk">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">内盘</div>
+                    <div class="card-value" id="innerDisk">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">内外比</div>
+                    <div class="card-value" id="outerInnerRatio">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">流向</div>
+                    <div class="card-value" id="mainFlow">--</div>
+                </div>
+            </div>
+            
+            <div class="grid grid-3" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">成交量</div>
+                    <div class="card-value" id="volume">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">平均每手</div>
+                    <div class="card-value" id="avgLot">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">流速</div>
+                    <div class="card-value" id="flowSpeed">--</div>
+                </div>
+            </div>
+            
+            <!-- 大中小单分布 -->
+            <div class="section-title">📊 大中小单分布</div>
+            <div class="grid grid-3" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">大单</div>
+                    <div class="card-value" id="largeOrder">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">中单</div>
+                    <div class="card-value" id="mediumOrder">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">小单</div>
+                    <div class="card-value" id="smallOrder">--</div>
+                </div>
+            </div>
+            
+            <!-- 筹码分布 -->
+            <div class="section-title">🎲 筹码分布</div>
+            <div class="grid grid-2" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">获利盘</div>
+                    <div class="card-value positive" id="profitRatio">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">套牢盘</div>
+                    <div class="card-value negative" id="trappedRatio">--</div>
+                </div>
+            </div>
+            
+            <!-- 预测分析 -->
+            <div class="section-title">🔮 预测分析</div>
+            <div class="grid grid-4" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">综合评分</div>
+                    <div class="card-value" id="compositeScore">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">加权目标</div>
+                    <div class="card-value" id="weightedTarget">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">上涨空间</div>
+                    <div class="card-value positive" id="upsideSpace">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">压力指数</div>
+                    <div class="card-value" id="pressureIndex">--</div>
+                </div>
+            </div>
+            
+            <!-- 情景分析 -->
+            <div class="section-title">📋 情景分析</div>
+            <div id="scenarioAnalysis" style="margin-bottom: 20px;"></div>
+            
+            <!-- K线信号 -->
+            <div class="section-title">📊 K线信号</div>
+            <div class="grid grid-2" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">看涨信号</div>
+                    <div id="bullishSignals"></div>
+                </div>
+                <div class="card">
+                    <div class="card-title">看跌信号</div>
+                    <div id="bearishSignals"></div>
+                </div>
+            </div>
+            
+            <!-- 趋势与 RSI -->
+            <div class="section-title">📈 趋势与 RSI</div>
+            <div class="grid grid-4" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">整体趋势</div>
+                    <div class="card-value" id="overallTrend">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">趋势强度</div>
+                    <div class="card-value" id="trendStrength">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">RSI 信号</div>
+                    <div class="card-value" id="rsiSignal">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">RSI 操作</div>
+                    <div class="card-value" id="rsiAction">--</div>
+                </div>
+            </div>
+            
+            <div class="grid grid-3" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">日 RSI</div>
+                    <div class="card-value" id="dayRsi">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">周 RSI</div>
+                    <div class="card-value" id="weekRsi">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">月 RSI</div>
+                    <div class="card-value" id="monthRsi">--</div>
+                </div>
+            </div>
+            
+            <div class="grid grid-3" style="margin-bottom: 20px;">
+                <div class="card">
+                    <div class="card-title">日趋势</div>
+                    <div class="card-value" id="dayTrend">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">周趋势</div>
+                    <div class="card-value" id="weekTrend">--</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">月趋势</div>
+                    <div class="card-value" id="monthTrend">--</div>
+                </div>
+            </div>
+            
+            <div class="card" style="margin-bottom: 20px;">
+                <div class="card-title">共振类型</div>
+                <div id="resonanceType" class="resonance-badge">--</div>
+            </div>
+            
+            <!-- 交易策略 -->
+            <div class="section-title">🎯 交易策略建议</div>
+            <div class="card" style="margin-bottom: 20px;">
+                <div class="strategy-actions">
+                    <div id="actionBadge" class="badge badge-blue" style="font-size: 20px; padding: 8px 24px;">--</div>
+                    <div id="confidenceBadge" class="badge badge-yellow">信心指数: --</div>
+                </div>
+                
+                <div style="margin: 16px 0;">
+                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;">
+                        <div>
+                            <div style="color: var(--text-secondary); font-size: 12px;">目标价格</div>
+                            <div style="font-size: 20px; font-weight: 700;" id="targetPrice">--</div>
+                        </div>
+                        <div>
+                            <div style="color: var(--text-secondary); font-size: 12px;">止损价格</div>
+                            <div style="font-size: 20px; font-weight: 700; color: var(--accent-red);" id="stopLoss">--</div>
+                        </div>
+                        <div>
+                            <div style="color: var(--text-secondary); font-size: 12px;">支撑位</div>
+                            <div style="font-size: 20px; font-weight: 700;" id="support">--</div>
+                        </div>
+                        <div>
+                            <div style="color: var(--text-secondary); font-size: 12px;">阻力位</div>
+                            <div style="font-size: 20px; font-weight: 700;" id="resistance">--</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 16px;">
+                    <div style="color: var(--text-secondary); font-size: 14px; margin-bottom: 8px;">📋 信号列表</div>
+                    <ul class="signal-list" id="signalList"></ul>
+                </div>
+            </div>
+            
+            <!-- 更新时间 -->
+            <div style="text-align: center; color: var(--text-secondary); font-size: 12px; padding: 20px;">
+                <div>数据更新时间: <span id="updateTime">--</span></div>
+                <div style="margin-top: 4px;">数据来源: yfinance | 分析周期: 1年</div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let priceChart = null;
+        
+        function formatPrice(price) {
+            return price ? '¥' + parseFloat(price).toFixed(2) : '--';
+        }
+        
+        function formatPercent(value) {
+            if (value === null || value === undefined) return '--';
+            const num = parseFloat(value);
+            return (num >= 0 ? '+' : '') + num.toFixed(2) + '%';
+        }
+        
+        function formatNumber(n) {
+            if (n === null || n === undefined) return '--';
+            return Number(n).toLocaleString('en-US');
+        }
+        
+        function getStatusBadge(value, thresholds) {
+            if (!value) return '<span class="badge badge-blue">--</span>';
+            const num = parseFloat(value);
+            if (num > thresholds.overbought) return '<span class="badge badge-red">超买</span>';
+            if (num < thresholds.oversold) return '<span class="badge badge-green">超卖</span>';
+            return '<span class="badge badge-blue">中性</span>';
+        }
+        
+        async function loadAnalysis() {
+            try {
+                const response = await fetch('/api/analyze/sz300620');
+                const data = await response.json();
+                
+                if (!data.success) {
+                    throw new Error(data.error || 'Analysis failed');
+                }
+                
+                const stock = data.analysis.basic_info;
+                const fundamental = data.analysis.fundamental;
+                const technical = data.technical;
+                const trend = data.trend;
+                const strategy = data.strategies;
+                const stats = data.statistics;
+                const fundFlow = data.analysis.fund_flow;
+                const prediction = data.analysis.prediction;
+                const klineSignals = data.kline_signals;
+                
+                // 核心指标
+                document.getElementById('currentPrice').textContent = formatPrice(stock.price);
+                document.getElementById('priceChange').innerHTML = '货币: ' + (stock.currency || 'CNY');
+                
+                const pnlEl = document.getElementById('positionPnl');
+                pnlEl.textContent = formatPercent(data.analysis.profit_analysis.profit_pct);
+                pnlEl.className = 'card-value ' + (data.analysis.profit_analysis.profit >= 0 ? 'positive' : 'negative');
+                
+                document.getElementById('action').textContent = strategy.action;
+                document.getElementById('action').className = 'card-value ' + 
+                    (strategy.action.includes('买') || strategy.action.includes('持') ? 'positive' : 'negative');
+                document.getElementById('confidence').textContent = '信心指数: ' + strategy.confidence + '%';
+                
+                document.getElementById('trend').textContent = trend.trend_desc;
+                document.getElementById('trend').className = 'card-value ' + 
+                    (trend.trend.includes('bull') ? 'positive' : trend.trend.includes('bear') ? 'negative' : '');
+                document.getElementById('trendDesc').textContent = 'MA5 ' + trend.ma5 + ' > MA20 ' + trend.ma20 + ' > MA60 ' + trend.ma60;
+                
+                // 基本面分析
+                document.getElementById('pe').textContent = fundamental.valuation.pe.toFixed(2);
+                document.getElementById('peLevel').textContent = fundamental.valuation.pe > 200 ? '偏高' : '合理';
+                document.getElementById('marketCap').textContent = (fundamental.valuation.market_cap / 100000000).toFixed(2);
+                document.getElementById('circulatingCap').textContent = (fundamental.valuation.circulating_cap / 100000000).toFixed(2);
+                document.getElementById('valuationLevel').textContent = fundamental.valuation.level;
+                
+                document.getElementById('revenueGrowth').textContent = fundamental.financial_health.revenue_growth;
+                document.getElementById('profitGrowth').textContent = fundamental.financial_health.profit_growth;
+                document.getElementById('grossMargin').textContent = fundamental.financial_health.gross_margin;
+                
+                // 技术分析
+                document.getElementById('klinePattern').textContent = technical.kline.pattern;
+                document.getElementById('amplitude').textContent = '振幅: ' + technical.kline.amplitude.toFixed(2) + '%';
+                document.getElementById('shortTermTrend').textContent = technical.trend.short_term;
+                
+                // 移动平均线
+                document.getElementById('ma5').textContent = formatPrice(technical.moving_averages.ma5);
+                document.getElementById('ma10').textContent = formatPrice(technical.moving_averages.ma10);
+                document.getElementById('ma20').textContent = formatPrice(technical.moving_averages.ma20);
+                document.getElementById('ma60').textContent = formatPrice(technical.moving_averages.ma60);
+                document.getElementById('ma120').textContent = formatPrice(technical.moving_averages.ma120);
+                document.getElementById('ma250').textContent = formatPrice(technical.moving_averages.ma250);
+                
+                // 支撑与阻力
+                const supportContainer = document.getElementById('supportLevels');
+                const resistanceContainer = document.getElementById('resistanceLevels');
+                supportContainer.innerHTML = '';
+                resistanceContainer.innerHTML = '';
+                
+                technical.support_resistance.supports.forEach(s => {
+                    supportContainer.innerHTML += '<div class="level-item"><span>' + formatPrice(s.level) + '</span><span class="level-desc">' + s.desc + '</span></div>';
+                });
+                technical.support_resistance.resistances.forEach(r => {
+                    resistanceContainer.innerHTML += '<div class="level-item"><span>' + formatPrice(r.level) + '</span><span class="level-desc">' + r.desc + '</span></div>';
+                });
+                
+                // 资金流向
+                document.getElementById('outerDisk').textContent = formatNumber(fundFlow.main_flow.outer_disk);
+                document.getElementById('innerDisk').textContent = formatNumber(fundFlow.main_flow.inner_disk);
+                document.getElementById('outerInnerRatio').textContent = fundFlow.main_flow.ratio.toFixed(2);
+                document.getElementById('mainFlow').textContent = fundFlow.main_flow.direction;
+                
+                document.getElementById('volume').textContent = formatNumber(fundFlow.volume_analysis.volume);
+                document.getElementById('avgLot').textContent = fundFlow.trade_count.avg_lot_size;
+                document.getElementById('flowSpeed').textContent = fundFlow.flow_speed.speed;
+                
+                // 大中小单分布
+                document.getElementById('largeOrder').textContent = fundFlow.trade_distribution.large + '%';
+                document.getElementById('mediumOrder').textContent = fundFlow.trade_distribution.medium + '%';
+                document.getElementById('smallOrder').textContent = fundFlow.trade_distribution.small + '%';
+                
+                // 筹码分布
+                document.getElementById('profitRatio').textContent = fundFlow.chip_distribution.profit_ratio + '%';
+                document.getElementById('trappedRatio').textContent = fundFlow.chip_distribution.trapped_ratio + '%';
+                
+                // 预测分析
+                document.getElementById('compositeScore').textContent = prediction.model.composite.toFixed(1);
+                document.getElementById('weightedTarget').textContent = formatPrice(prediction.weighted_target);
+                document.getElementById('upsideSpace').textContent = '+' + prediction.upside_space.toFixed(1) + '%';
+                document.getElementById('pressureIndex').textContent = fundFlow.pressure_index.index.toFixed(2);
+                
+                // 情景分析
+                const scenarioContainer = document.getElementById('scenarioAnalysis');
+                scenarioContainer.innerHTML = '';
+                prediction.scenarios.forEach(scenario => {
+                    const className = scenario.name.includes('乐观') ? 'optimistic' : scenario.name.includes('中性') ? 'neutral' : 'pessimistic';
+                    scenarioContainer.innerHTML += '<div class="scenario-card ' + className + '">' +
+                        '<div class="scenario-header"><span class="scenario-name">' + scenario.name + '</span><span class="scenario-prob">' + scenario.probability + '</span></div>' +
+                        '<div class="scenario-target">' + scenario.target_range + '元</div>' +
+                        '<div class="scenario-signal">' + scenario.signal + '</div></div>';
+                });
+                
+                // K线信号
+                const bullishContainer = document.getElementById('bullishSignals');
+                const bearishContainer = document.getElementById('bearishSignals');
+                bullishContainer.innerHTML = '';
+                bearishContainer.innerHTML = '';
+                
+                klineSignals.bullish_signals.forEach(s => {
+                    bullishContainer.innerHTML += '<div class="kline-signal-item bullish">✓ ' + s + '</div>';
+                });
+                klineSignals.bearish_signals.forEach(s => {
+                    bearishContainer.innerHTML += '<div class="kline-signal-item bearish">✗ ' + s + '</div>';
+                });
+                
+                // 趋势与 RSI
+                document.getElementById('overallTrend').textContent = klineSignals.overall_trend;
+                document.getElementById('trendStrength').textContent = klineSignals.trend_strength;
+                document.getElementById('rsiSignal').textContent = klineSignals.rsi_signal;
+                document.getElementById('rsiAction').textContent = klineSignals.rsi_action;
+                
+                document.getElementById('dayRsi').textContent = klineSignals.day_rsi.toFixed(1);
+                document.getElementById('weekRsi').textContent = klineSignals.week_rsi.toFixed(1);
+                document.getElementById('monthRsi').textContent = klineSignals.month_rsi.toFixed(1);
+                
+                document.getElementById('dayTrend').textContent = klineSignals.day_trend;
+                document.getElementById('weekTrend').textContent = klineSignals.week_trend;
+                document.getElementById('monthTrend').textContent = klineSignals.month_trend;
+                
+                document.getElementById('resonanceType').textContent = klineSignals.resonance_type + ' - ' + klineSignals.resonance_direction;
+                
+                // RSI 指标
+                document.getElementById('rsi').textContent = technical.indicators.rsi.toFixed(2);
+                document.getElementById('rsiStatus').innerHTML = getStatusBadge(technical.indicators.rsi, {overbought: 70, oversold: 30});
+                document.getElementById('volatility').textContent = technical.indicators.volatility + '%';
+                
+                const rsiGauge = document.getElementById('rsiGauge');
+                rsiGauge.style.width = Math.min(technical.indicators.rsi, 100) + '%';
+                rsiGauge.className = 'rsi-fill ' + (technical.indicators.rsi > 70 ? 'bearish' : technical.indicators.rsi < 30 ? 'bullish' : 'neutral');
+                
+                // MACD 指标
+                document.getElementById('macd').textContent = technical.indicators.macd.toFixed(2);
+                document.getElementById('macdSignal').textContent = technical.indicators.kdj;
+                document.getElementById('macdHist').textContent = technical.indicators.bollinger;
+                document.getElementById('macdHist').className = 'metric-value ' + (technical.indicators.macd >= 0 ? 'positive' : 'negative');
+                
+                // 布林带
+                const boll = technical.bollinger;
+                document.getElementById('bollUpper').textContent = formatPrice(boll.upper[boll.upper.length - 1]);
+                document.getElementById('bollMiddle').textContent = formatPrice(boll.middle[boll.middle.length - 1]);
+                document.getElementById('bollLower').textContent = formatPrice(boll.lower[boll.lower.length - 1]);
+                
+                // 统计
+                document.getElementById('avgReturn').textContent = formatPercent(stats.avg_return);
+                document.getElementById('maxGain').textContent = formatPercent(stats.max_daily_gain);
+                document.getElementById('maxLoss').textContent = formatPercent(stats.max_daily_loss);
+                document.getElementById('positiveDays').textContent = (stats.positive_days / stats.total_days * 100).toFixed(1) + '%';
+                
+                // 策略
+                document.getElementById('actionBadge').textContent = strategy.action;
+                document.getElementById('actionBadge').className = 'badge ' + 
+                    (strategy.action.includes('买') ? 'badge-green' : strategy.action.includes('卖') ? 'badge-red' : 'badge-blue');
+                document.getElementById('confidenceBadge').textContent = '信心指数: ' + strategy.confidence + '%';
+                
+                document.getElementById('targetPrice').textContent = formatPrice(strategy.target_price);
+                document.getElementById('stopLoss').textContent = formatPrice(strategy.stop_loss);
+                document.getElementById('support').textContent = formatPrice(strategy.support);
+                document.getElementById('resistance').textContent = formatPrice(strategy.resistance);
+                
+                // 信号列表
+                const signalList = document.getElementById('signalList');
+                signalList.innerHTML = '';
+                strategy.signals.forEach(signal => {
+                    const li = document.createElement('li');
+                    li.textContent = signal;
+                    signalList.appendChild(li);
+                });
+                
+                // 更新时间
+                document.getElementById('updateTime').textContent = data.timestamp;
+                
+                // 绘制图表
+                renderChart(data.chart_data);
+            } catch (error) {
+                console.error('Failed to load analysis:', error);
+                document.getElementById('loading').innerHTML = '<div style="color: var(--accent-red);">加载失败: ' + error.message + '</div>';
+            }
+        }
+        
+        function renderChart(chartData) {
+            const ctx = document.getElementById('priceChart').getContext('2d');
+            
+            if (priceChart) {
+                priceChart.destroy();
+            }
+            
+            priceChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: chartData.dates,
+                    datasets: [{
+                        label: '价格',
+                        data: chartData.prices,
+                        borderColor: '#448aff',
+                        backgroundColor: 'rgba(68, 138, 255, 0.1)',
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 0,
+                        pointHoverRadius: 4,
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            grid: { color: 'rgba(45, 53, 97, 0.5)' },
+                            ticks: { color: '#9fa8da', font: { size: 10 }, maxTicksLimit: 10 }
+                        },
+                        y: {
+                            grid: { color: 'rgba(45, 53, 97, 0.5)' },
+                            ticks: { color: '#9fa8da', font: { size: 10 }, callback: v => '¥' + v.toFixed(0) }
+                        }
+                    },
+                    plugins: {
+                        legend: { display: false }
+                    }
+                }
+            });
+        }
+        
+        // 初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            loadAnalysis();
+            // 每 30 秒刷新一次
+            setInterval(loadAnalysis, 30000);
+        });
+    </script>
+</body>
+</html>
