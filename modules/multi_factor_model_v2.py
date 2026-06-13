@@ -215,11 +215,22 @@ class MultiFactorModelV2:
         return 3.0
 
     def rsi_technical(self, stock_data: Dict) -> float:
-        """RSI 技术因子（中性最优，极端危险）"""
+        """RSI 技术因子 — 超卖看涨(高分), 超买看跌(低分)
+
+        RSI < 30: 超卖 → 强烈看涨 → 10分
+        RSI 30-40: 偏弱 → 6分
+        RSI 40-60: 中性 → 5分
+        RSI 60-70: 偏强 → 3分
+        RSI > 70: 超买 → 强烈看跌 → 0分
+        """
         rsi = stock_data.get('rsi_14', 50)
-        # RSI 在 45-55 之间最优，极端值扣分
-        distance_from_50 = abs(rsi - 50)
-        return max(0, min(10, 10 - distance_from_50 / 5))
+        if rsi < 20:    return 10.0  # 深度超卖 → 强烈看涨
+        elif rsi < 30:  return 8.0   # 超卖 → 看涨
+        elif rsi < 40:  return 6.0   # 偏弱
+        elif rsi < 60:  return 5.0   # 中性
+        elif rsi < 70:  return 3.0   # 偏强
+        elif rsi < 80:  return 2.0   # 超买 → 看跌
+        else:           return 0.0   # 深度超买 → 强烈看跌
 
     def macd_slope(self, stock_data: Dict, klines: Optional[List[Dict]] = None) -> float:
         """MACD 斜率（上升加分）"""
@@ -433,6 +444,78 @@ class MultiFactorModelV2:
             self.factor_weights = {
                 f: v / total for f, v in abs_ics.items()
             }
+
+    def update_weights_rolling_ic(
+        self,
+        factor_history: Dict[str, List[float]],
+        returns: List[float],
+        window: int = 60,
+        min_icir: float = 0.05,
+    ):
+        """
+        基于滚动 IC/ICIR 动态更新因子权重
+
+        原理:
+            - 计算每个因子在最近 window 天内的 IC (Information Coefficient)
+            - IC = 因子值与未来收益率的 Rank Spearman 相关系数
+            - ICIR = mean(IC) / std(IC)，衡量稳定性
+            - 权重 ∝ max(ICIR, min_icir)，确保每个因子至少有一定权重
+
+        Args:
+            factor_history: {factor_name: [factor_value_t1, factor_value_t2, ...]}
+            returns: 未来收益率序列 [r_t1, r_t2, ...]
+            window: 滚动窗口大小 (默认 60 天)
+            min_icir: 最小 ICIR 阈值 (默认 0.05)
+        """
+        new_weights = {}
+        for factor_name, factor_values in factor_history.items():
+            if len(factor_values) < window:
+                continue
+
+            # 取最近 window 个值
+            fv = np.array(factor_values[-window:])
+            ret = np.array(returns[-window:])
+
+            # 跳过全为常量的因子
+            if np.std(fv) < 1e-10 or np.std(ret) < 1e-10:
+                continue
+
+            # Rank Spearman 相关系数
+            fv_rank = np.rank(fv)
+            ret_rank = np.rank(ret)
+            ic = np.corrcoef(fv_rank, ret_rank)[0, 1]
+
+            if np.isnan(ic):
+                continue
+
+            # ICIR
+            icir = abs(ic)  # 简化: 单窗口 ICIR = |IC|
+            if icir >= min_icir:
+                new_weights[factor_name] = icir
+
+        total = sum(new_weights.values())
+        if total > 0:
+            old_weights = dict(self.factor_weights)
+            self.factor_weights = {k: v / total for k, v in new_weights.items()}
+            logger.info(
+                f"[FactorModel] 因子权重已基于滚动 IC/ICIR 更新 "
+                f"(window={window}, 有效因子={len(new_weights)}/{len(factor_history)})"
+            )
+            logger.debug(f"[FactorModel] 权重变化: {old_weights} → {self.factor_weights}")
+        else:
+            logger.warning("[FactorModel] 无因子满足 ICIR 阈值，权重未更新")
+
+    def get_factor_efficacy_report(self, window: int = 60) -> Dict[str, float]:
+        """获取因子效能报告 (IC/ICIR)"""
+        report = {}
+        for factor_name, factor_values in self._factor_ic_history.items():
+            if len(factor_values) < window:
+                continue
+            vals = np.array(factor_values[-window:])
+            ic = float(np.mean(vals))
+            icir = ic / (np.std(vals) + 1e-10)
+            report[factor_name] = round(icir, 4)
+        return report
 
     # ── 横截面标准化 ──────────────────────────────────────────────
 

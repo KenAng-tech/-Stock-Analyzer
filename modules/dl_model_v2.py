@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 """
-深度学习模型 V2 — Transformer-LSTM 混合架构
+深度学习模型 V2 — PatchTST 时序预测模型 (2026-06-13 升级)
 
 升级内容:
-1. Transformer Encoder 层 — 自注意力机制捕捉全局依赖
-2. LSTM 层 — 时序建模
-3. Self-Attention GRU — 在 GRU 中引入注意力机制
-4. 集成预测头 — 多模型融合
-
-依赖:
-- MLX (Apple 原生框架，用于高效张量计算)
-- 或 NumPy fallback (未安装 MLX 时)
+1. [NEW] PatchTST (ICML 2023) — 基于 Patch 的 Transformer，O(n/patch_len) 复杂度
+2. [NEW] RoPE 位置编码 — 旋转位置编码，适合长序列外推
+3. [NEW] 完整 PyTorch 训练管线 — 反向传播 + AdamW + Cosine Annealing
+4. [DEPRECATED] NumPy Transformer-LSTM (无反向传播，保留为 fallback)
 
 架构:
     Input(seq_len, features)
-        ↓
-    Transformer Encoder (n_heads=8, d_model=64)
-        ↓
-    LSTM Layer (hidden=128)
-        ↓
-    Self-Attention Pooling
-        ↓
-    FFN Head (方向预测 + 置信度)
+        → Patch 分片 (patch_len=8)
+        → 投影到 d_model=128
+        → RoPE 位置编码
+        → Transformer Encoder (4 layers, 8 heads)
+        → 最后一个 Patch → Linear Head
+        → 输出 (up/neutral/down)
+
+依赖:
+    - PyTorch ≥ 2.0 (必需)
+
+向后兼容:
+    - 保留 NumPy 实现作为 fallback (当 PyTorch 不可用时)
+    - DeepLearningEnsemble 接口不变
 """
 
 import numpy as np
@@ -34,19 +35,19 @@ import pickle
 
 from modules.logger import logger
 
-
-# ── MLX 组件 (如果可用) ──────────────────────────────────────
+# ── 优先使用 PatchTST (PyTorch) ──────────────────────────────
 
 try:
-    import mlx.core as mx
-    import mlx.nn as nn
-    from mlx.optimizers import Adam
-
-    USE_MLX = True
-    logger.info("[DLModelV2] MLX 框架已加载")
-except ImportError:
-    USE_MLX = False
-    logger.warning("[DLModelV2] MLX 未安装，使用 NumPy 回退模式")
+    from modules.patchtst_model import (
+        PatchTST,
+        PatchTSTTrainer,
+        DeepLearningEnsemble as _PatchTSTEnsemble,
+    )
+    USE_PATCHTST = True
+    logger.info("[DLModelV2] PatchTST (PyTorch) 已加载 — 默认使用")
+except ImportError as e:
+    USE_PATCHTST = False
+    logger.warning(f"[DLModelV2] PatchTST 加载失败 ({e})，尝试 NumPy fallback")
 
 
 # ── NumPy 实现的深度学习组件 ──────────────────────────────────
@@ -758,5 +759,12 @@ class DeepLearningEnsemble:
         return model
 
 
-# 全局实例
-dl_ensemble = DeepLearningEnsemble()
+# ── 全局实例 ──────────────────────────────────────────────────
+
+if USE_PATCHTST:
+    dl_ensemble = _PatchTSTEnsemble()
+    logger.info("[DLModelV2] 全局实例: PatchTST DeepLearningEnsemble")
+else:
+    # NumPy fallback — 旧实现 (无实际训练能力)
+    dl_ensemble = DeepLearningEnsemble()
+    logger.warning("[DLModelV2] 全局实例: NumPy DeepLearningEnsemble (无训练能力)")

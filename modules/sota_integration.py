@@ -38,6 +38,7 @@ SOTA References:
 import json
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 
@@ -94,8 +95,11 @@ class SOTAIntegrationEngine:
         llm_config = {
             "omlx_url": self.config.get("omlx_url", "http://127.0.0.1:8080"),
             "omlx_model": self.config.get("omlx_model", "default"),
+            "omlx_timeout": 10.0,  # 降低 OMLX 超时以加速降级
             "openai_key": self.config.get("openai_key", ""),
             "anthropic_key": self.config.get("anthropic_key", ""),
+            "failure_threshold": 2,  # 降低熔断阈值
+            "recovery_timeout": 10.0,
         }
         self.llm_client = LLMClient(llm_config)
         
@@ -110,6 +114,36 @@ class SOTAIntegrationEngine:
         # 缓存最近决策
         self._recent_decisions = []
         self._max_cache_size = 100
+
+        # 全局超时: 每个 LLM 阶段最多 15 秒
+        self.stage_timeout = 15.0
+
+    def _run_with_timeout(self, fn, args=(), kwargs=None, timeout=None):
+        """在超时限制内运行函数，返回 (result, success)"""
+        if kwargs is None:
+            kwargs = {}
+        timeout = timeout or self.stage_timeout
+
+        result_container = [None]
+        error_container = [None]
+
+        def _wrap():
+            try:
+                result_container[0] = fn(*args, **kwargs)
+            except Exception as e:
+                error_container[0] = e
+
+        thread = threading.Thread(target=_wrap)
+        thread.daemon = True
+        thread.start()
+        thread.join(timeout=timeout)
+
+        if thread.is_alive():
+            logger.warning(f"[SOTAEngine] 阶段超时 ({timeout}s)，跳过")
+            return None, False
+        if error_container[0]:
+            raise error_container[0]
+        return result_container[0], True
     
     def make_decision(self, stock_data: Dict, portfolio_state: Dict = None) -> SOTADecision:
         """
@@ -132,23 +166,55 @@ class SOTAIntegrationEngine:
             agent_decision = self.agent_coordinator.make_decision(stock_data, portfolio_state)
             llm_decision = self.agent_coordinator.get_decision_json(agent_decision)
             
-            # 阶段 2: Factor Mining
+            # 阶段 2: Factor Mining (带超时)
             logger.info("[SOTAEngine] 阶段 2: Factor Mining")
-            factors = self.factor_mining.mine_and_evaluate(stock_data, {})
-            factor_scores = {f.name: {"ic": f.ic, "icir": f.icir, "efficacy": f.efficacy} for f in factors}
-            
-            # 阶段 3: Multi-Modal Reasoning
+            try:
+                factors, ok = self._run_with_timeout(
+                    self.factor_mining.mine_and_evaluate, (stock_data, {})
+                )
+                if ok and factors:
+                    factor_scores = {f.name: {"ic": f.ic, "icir": f.icir, "efficacy": f.efficacy} for f in factors}
+                else:
+                    logger.warning("[SOTAEngine] Factor Mining 超时/失败，使用空因子")
+                    factor_scores = {}
+                    factors = []
+            except Exception as e:
+                logger.error(f"[SOTAEngine] Factor Mining 异常: {e}")
+                factor_scores = {}
+                factors = []
+
+            # 阶段 3: Multi-Modal Reasoning (带超时)
             logger.info("[SOTAEngine] 阶段 3: Multi-Modal Reasoning")
-            cross_modal = self.multi_modal.analyze(stock_data)
-            
+            try:
+                cross_modal, ok = self._run_with_timeout(self.multi_modal.analyze, (stock_data,))
+                if not ok:
+                    cross_modal = {"consistency_score": 0.5, "final_direction": "neutral"}
+            except Exception as e:
+                logger.error(f"[SOTAEngine] Multi-Modal 异常: {e}")
+                cross_modal = {"consistency_score": 0.5, "final_direction": "neutral"}
+
             # 阶段 4: RL Execution (简化版 - 基于现有 RL Trader)
             logger.info("[SOTAEngine] 阶段 4: RL Execution")
             rl_action, rl_confidence, rl_position = self._execute_rl(stock_data)
-            
-            # 阶段 5: Ensemble Aggregation
-            logger.info("[SOTAEngine] 阶段 5: Ensemble Aggregation")
+
+            # 阶段 5: 市场状态检测 (用于动态权重)
+            logger.info("[SOTAEngine] 阶段 5: 市场状态检测")
+            market_regime = 'sideways'
+            try:
+                from modules.hmm_market_detector import MarketRegimeDetector
+                regime_detector = MarketRegimeDetector()
+                klines_data = stock_data.get('klines', stock_data.get('kline_data', None))
+                if klines_data:
+                    regime_result = regime_detector.detect_regime(klines_data)
+                    market_regime = regime_result.get('regime', 'sideways')
+            except Exception as e:
+                logger.debug(f"[SOTAEngine] 市场状态检测失败: {e}")
+
+            # 阶段 6: Ensemble Aggregation (动态权重)
+            logger.info("[SOTAEngine] 阶段 6: Ensemble Aggregation (regime={})".format(market_regime))
             ensemble_score, ensemble_direction = self._ensemble_aggregate(
-                llm_decision, factor_scores, cross_modal, rl_action
+                llm_decision, factor_scores, cross_modal, rl_action,
+                market_regime=market_regime
             )
             
             # 计算执行时间
@@ -218,47 +284,66 @@ class SOTAIntegrationEngine:
             logger.warning(f"[SOTAEngine] RL 执行失败: {e}")
             return "hold", 0.5, 0.0
     
-    def _ensemble_aggregate(self, llm_decision: Dict, 
+    def _ensemble_aggregate(self, llm_decision: Dict,
                            factor_scores: Dict,
                            cross_modal: Dict,
-                           rl_action: str) -> tuple:
+                           rl_action: str,
+                           market_regime: str = 'sideways') -> tuple:
         """
-        集成聚合 - 加权组合所有层级的决策
-        
-        权重配置 (基于 SOTA 论文建议):
-        - LLM Multi-Agent: 0.40
-        - Factor Mining: 0.20
-        - Multi-Modal: 0.15
-        - RL Execution: 0.25
+        动态集成聚合 — 根据 HMM 市场状态调整权重
+
+        原理:
+            - 牛市: RL 权重提升 (趋势跟踪效果好), 因子权重次之
+            - 熊市: LLM 权重提升 (宏观判断更重要), RL 权重次之
+            - 震荡市: 因子权重提升 (均值回归策略更有效)
+
+        权重配置:
+            regime     | LLM | Factor | MultiModal | RL
+            ----------|-----|--------|------------|-----
+            bullish   | 0.30| 0.25   | 0.20       | 0.25
+            bearish   | 0.35| 0.20   | 0.15       | 0.30
+            sideways  | 0.25| 0.35   | 0.25       | 0.15
         """
+        # 不同 regime 的最优权重
+        regime_weights = {
+            'bullish':   {'llm': 0.30, 'factor': 0.25, 'multimodal': 0.20, 'rl': 0.25},
+            'bearish':   {'llm': 0.35, 'factor': 0.20, 'multimodal': 0.15, 'rl': 0.30},
+            'sideways':  {'llm': 0.25, 'factor': 0.35, 'multimodal': 0.25, 'rl': 0.15},
+        }
+        weights = regime_weights.get(market_regime, regime_weights['sideways'])
+
         # LLM 方向得分
         direction_scores = {
             "bullish": 0.7,
             "bearish": 0.3,
             "neutral": 0.5
         }
-        llm_score = direction_scores.get(llm_decision.get("research_direction", "neutral"), 0.5)
-        
-        # 因子得分
+        llm_score = direction_scores.get(
+            llm_decision.get("research_direction", "neutral"), 0.5
+        )
+
+        # 因子得分 (平均因子效能)
         avg_factor_efficacy = 0.0
         if factor_scores:
-            avg_factor_efficacy = sum(f.get("efficacy", 0) for f in factor_scores.values()) / len(factor_scores)
-        
+            avg_factor_efficacy = sum(
+                f.get("efficacy", 0) for f in factor_scores.values()
+            ) / len(factor_scores)
+
         # 跨模态得分
         cross_modal_score = cross_modal.get("consistency_score", 0.5)
-        
+
         # RL 动作得分
         rl_scores = {"buy": 0.7, "sell": 0.3, "hold": 0.5}
         rl_score = rl_scores.get(rl_action, 0.5)
-        
+
         # 加权聚合
         ensemble_score = (
-            llm_score * 0.40 +
-            avg_factor_efficacy * 0.20 +
-            cross_modal_score * 0.15 +
-            rl_score * 0.25
+            llm_score * weights['llm'] +
+            avg_factor_efficacy * weights['factor'] +
+            cross_modal_score * weights['multimodal'] +
+            rl_score * weights['rl']
         )
-        
+
         # 确定方向
         if ensemble_score > 0.6:
             direction = "bullish"
@@ -266,7 +351,7 @@ class SOTAIntegrationEngine:
             direction = "bearish"
         else:
             direction = "neutral"
-        
+
         return round(ensemble_score, 3), direction
     
     def _cache_decision(self, decision: SOTADecision):

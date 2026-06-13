@@ -39,34 +39,6 @@ from modules.dynamic_cache import cache
 from modules.logger import logger
 from config import config
 
-# ============================================================================
-# P0: SOTA Integration (LLM Multi-Agent + Factor Mining + Multi-Modal + RL)
-# ============================================================================
-try:
-    from modules.sota_integration import SOTAIntegrationEngine, SOTADecision
-    SOTA_ENGINE = None
-    SOTA_ENGINE_LOCK = threading.Lock()
-except ImportError:
-    SOTA_ENGINE = None
-    logger.warning("[SOTA] sota_integration not available")
-
-# ============================================================================
-# P2: Barra Risk Model (Phase 2 Integration)
-# ============================================================================
-try:
-    from modules.barra_risk_model import BarraRiskModel
-    BARRA_RISK = None
-except ImportError:
-    BARRA_RISK = None
-    logger.warning("[Barra] barra_risk_model not available")
-
-# ============================================================================
-# P1: SOTA Engine Singleton (consolidated - used by all SOTA API endpoints)
-# ============================================================================
-_sota_engine = None
-_sota_engine_lock = threading.Lock()
-
-
 # Dashboard API Blueprint (P0-P3 量化模型仪表盘)
 from modules.dashboard_api import bp as dashboard_bp
 
@@ -111,23 +83,6 @@ DEFAULT_STOCK = {
 # Data cache
 data_cache = {}
 CACHE_TTL = 60
-
-# ============================================================================
-# SOTA Engine Singleton (consolidated - used by all SOTA API endpoints)
-# ============================================================================
-def _get_sota_engine():
-    """Get or create SOTA Engine singleton"""
-    global _sota_engine
-    if _sota_engine is None:
-        with _sota_engine_lock:
-            if _sota_engine is None:
-                try:
-                    _sota_engine = SOTAIntegrationEngine()
-                    logger.info("[SOTA] Engine initialized")
-                except Exception as e:
-                    logger.error(f"[SOTA] Init error: {e}")
-                    _sota_engine = None
-    return _sota_engine
 
 
 def get_stock_data(stock_code: str = None) -> dict:
@@ -258,49 +213,6 @@ def api_analyze_stock(stock_code):
         logger.error(f"ATR calculation error: {e}")
         atr_stop = atr_profit = atr_sr = {}
 
-    # P0: SOTA Decision (LLM Multi-Agent + Factor Mining + Multi-Modal + RL)
-    sota_decision = None
-    sota_error = None
-    try:
-        sota_engine = _get_sota_engine()
-        if sota_engine is not None:
-            sota_decision = sota_engine.make_decision(stock_data, {})
-            logger.info(f"[SOTA] Decision: {sota_decision.ensemble_direction}, score: {sota_decision.ensemble_score}")
-    except Exception as e:
-        sota_error = str(e)
-        logger.warning(f"[SOTA] Decision error: {e}")
-    
-    # P1: SOTA-enhanced strategy (adjust based on SOTA decision)
-    if sota_decision is not None:
-        sota_direction = sota_decision.ensemble_direction
-        sota_score = sota_decision.ensemble_score
-        
-        # Adjust strategy recommendation based on SOTA ensemble
-        for strat in strategies:
-            if sota_direction == 'bullish' and sota_score > 0.65:
-                strat['priority'] = 'high'
-                strat['sota_boost'] = '+0.15'
-                strat['reason'].append(f'SOTA看涨(score={sota_score:.2f})')
-            elif sota_direction == 'bearish' and sota_score < 0.35:
-                strat['priority'] = 'high'
-                strat['sota_boost'] = '-0.15'
-                strat['reason'].append(f'SOTA看跌(score={sota_score:.2f})')
-            else:
-                strat['sota_boost'] = '0.00'
-        
-        # P2: Barra risk adjustment (Phase 2)
-        if BARRA_RISK is not None:
-            try:
-                klines = data_fetcher.get_kline_data(stock_code, 'daily', 60)
-                exposures = BARRA_RISK.calculate_all_exposures(stock_data, klines)
-                risk_weight = BARRA_RISK.get_risk_weight(exposures)
-                
-                # Adjust Kelly position based on Barra risk
-                if 'kelly_position' in strategies:
-                    strategies['kelly_position'] = strategies['kelly_position'] * risk_weight
-            except Exception as e:
-                logger.warning(f"[Barra] Risk adjustment error: {e}")
-    
     return jsonify({
         'success': True,
         'analysis': analysis,
@@ -321,19 +233,7 @@ def api_analyze_stock(stock_code):
         },
         'report': report,
         'report_filename': report_filename,
-        'timestamp': datetime.now().isoformat(),
-        # P0: SOTA Decision Result
-        'sota': {
-            'ensemble_direction': sota_decision.ensemble_direction if sota_decision else 'unavailable',
-            'ensemble_score': sota_decision.ensemble_score if sota_decision else 0.0,
-            'llm_decision': sota_decision.llm_decision if sota_decision else {},
-            'rl_action': sota_decision.rl_action if sota_decision else 'hold',
-            'rl_confidence': sota_decision.rl_confidence if sota_decision else 0.0,
-            'new_factors': [f.name for f in (sota_decision.new_factors if sota_decision else [])],
-            'cross_modal': sota_decision.cross_modal if sota_decision else {},
-            'execution_time_ms': sota_decision.execution_time_ms if sota_decision else 0.0,
-            'error': sota_error
-        }
+        'timestamp': datetime.now().isoformat()
     })
 
 
@@ -558,72 +458,6 @@ def api_quant_refresh():
         'success': True,
         'timestamp': datetime.now().isoformat()
     })
-
-
-# ============================================================================
-# P1: SOTA Realtime Signals API (Phase 1 Integration)
-# ============================================================================
-
-@app.route('/api/realtime/sota-signals')
-def api_realtime_sota_signals():
-    """SOTA 实时信号 — 融合 LLM Agent + Multi-Modal + RL"""
-    stock_data = get_stock_data()
-    if not stock_data:
-        return jsonify({'success': False}), 500
-    
-    sota_engine = _get_sota_engine()
-    decision = sota_engine.make_decision(stock_data)
-    
-    return jsonify({
-        'success': True,
-        'ensemble_direction': decision.ensemble_direction,
-        'ensemble_score': decision.ensemble_score,
-        'llm_decision': decision.llm_decision,
-        'new_factors': decision.new_factors,
-        'cross_modal': decision.cross_modal,
-        'rl_action': decision.rl_action,
-        'rl_confidence': decision.rl_confidence,
-        'execution_time_ms': decision.execution_time_ms,
-        'timestamp': datetime.now().isoformat()
-    })
-
-
-# ============================================================================
-# P2: Barra Risk Model API (Phase 2 Integration)
-# ============================================================================
-
-@app.route('/api/barra/risk-exposure')
-def api_barra_risk_exposure():
-    """获取 Barra 风险因子暴露"""
-    stock_data = get_stock_data()
-    if not stock_data:
-        return jsonify({'success': False}), 500
-    
-    if BARRA_RISK is None:
-        try:
-            from modules.barra_risk_model import BarraRiskModel
-            BARRA_RISK = BarraRiskModel()
-        except Exception as e:
-            return jsonify({'success': False, 'error': f'Barra model not available: {e}'}), 500
-    
-    try:
-        # 获取 K 线数据
-        klines = data_fetcher.get_kline_data(DEFAULT_STOCK['code'], 'daily', 60)
-        
-        # 计算 Barra 因子暴露
-        exposures = BARRA_RISK.calculate_all_exposures(stock_data, klines)
-        risk_decomposition = BARRA_RISK.risk_decomposition(exposures)
-        
-        return jsonify({
-            'success': True,
-            'exposures': exposures,
-            'risk_decomposition': risk_decomposition,
-            'risk_weight': BARRA_RISK.get_risk_weight(exposures),
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"[Barra] Risk exposure error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # ============================================================================
@@ -1496,6 +1330,26 @@ def dl_dashboard():
 # ============================================================================
 # SOTA Quantitative Model API Endpoints
 # ============================================================================
+
+# Initialize SOTA Engine (lazy-loaded on first request)
+_sota_engine = None
+_sota_engine_lock = threading.Lock()
+
+def _get_sota_engine():
+    """Get or create SOTA Engine singleton"""
+    global _sota_engine
+    if _sota_engine is None:
+        with _sota_engine_lock:
+            if _sota_engine is None:
+                try:
+                    from modules.sota_integration import SOTAIntegrationEngine
+                    _sota_engine = SOTAIntegrationEngine()
+                    logger.info("[SOTA] Engine initialized")
+                except ImportError as e:
+                    logger.error(f"[SOTA] Import error: {e}")
+                    _sota_engine = None
+    return _sota_engine
+
 
 @app.route('/api/sota/decision', methods=['POST'])
 def api_sota_decision():

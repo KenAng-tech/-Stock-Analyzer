@@ -14,7 +14,9 @@ SOTA Reference:
 """
 
 import json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
@@ -313,32 +315,64 @@ class NewsAnalyst:
 
 class AnalystTeam:
     """分析师团队 - 并行执行所有分析师"""
-    
-    def __init__(self, llm_client: LLMClient):
+
+    def __init__(self, llm_client: LLMClient, timeout: float = 45.0):
         self.fund_analyst = FundAnalyst(llm_client)
         self.sentiment_analyst = SentimentAnalyst(llm_client)
         self.technical_analyst = TechnicalAnalyst(llm_client)
         self.news_analyst = NewsAnalyst(llm_client)
-    
+        self.timeout = timeout  # 全局超时
+
     def analyze(self, stock_data: Dict) -> List[AnalystInsight]:
-        """并行执行所有分析师"""
-        insights = []
-        
-        # 顺序执行（可改为并行）
-        insights.append(self.fund_analyst.analyze(stock_data))
-        insights.append(self.sentiment_analyst.analyze(stock_data))
-        insights.append(self.technical_analyst.analyze(stock_data))
-        insights.append(self.news_analyst.analyze(stock_data))
-        
-        return insights
+        """并行执行所有分析师 (线程池)"""
+        analysts = [
+            (0, 'fundamental', self.fund_analyst),
+            (1, 'sentiment', self.sentiment_analyst),
+            (2, 'technical', self.technical_analyst),
+            (3, 'news', self.news_analyst),
+        ]
+
+        insights = [None] * len(analysts)
+
+        def _run(idx, name, analyst):
+            try:
+                insights[idx] = analyst.analyze(stock_data)
+                logger.debug(f"[AnalystTeam] {name} 完成")
+            except Exception as e:
+                logger.error(f"[AnalystTeam] {name} 异常: {e}")
+                insights[idx] = AnalystInsight(name, "neutral", 0.3, f"Error: {e}")
+
+        try:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = [executor.submit(_run, idx, name, a) for idx, name, a in analysts]
+                for f in futures:
+                    f.result(timeout=self.timeout)  # 等待所有完成，带超时
+        except FuturesTimeoutError:
+            logger.warning("[AnalystTeam] 分析师并行超时，返回已完成的分析")
+        except Exception as e:
+            logger.error(f"[AnalystTeam] 并行执行异常: {e}")
+
+        # 过滤 None
+        result = [i for i in insights if i is not None]
+        if not result:
+            logger.error("[AnalystTeam] 所有分析师均失败，返回默认洞察")
+            return [AnalystInsight("default", "neutral", 0.3, "All analysts failed")]
+        return result
     
     def get_summary(self, insights: List[AnalystInsight]) -> Dict:
         """获取分析师团队总结"""
+        if not insights:
+            return {
+                "consensus": "neutral", "bullish_count": 0, "bearish_count": 0,
+                "neutral_count": 0, "avg_confidence": 0.3, "agreement_ratio": 0.0,
+                "insights": [],
+            }
+
         bullish_count = sum(1 for i in insights if i.direction == "bullish")
         bearish_count = sum(1 for i in insights if i.direction == "bearish")
         neutral_count = sum(1 for i in insights if i.direction == "neutral")
         avg_confidence = sum(i.confidence for i in insights) / len(insights)
-        
+
         # 综合方向
         if bullish_count > bearish_count:
             consensus = "bullish"
@@ -346,15 +380,20 @@ class AnalystTeam:
             consensus = "bearish"
         else:
             consensus = "neutral"
-        
+
+        # 共识比例: 同意共识方向的分析师比例
+        agree_count = {"bullish": bullish_count, "bearish": bearish_count, "neutral": neutral_count}[consensus]
+        agreement_ratio = agree_count / len(insights)
+
         return {
             "consensus": consensus,
             "bullish_count": bullish_count,
             "bearish_count": bearish_count,
             "neutral_count": neutral_count,
             "avg_confidence": round(avg_confidence, 3),
+            "agreement_ratio": round(agreement_ratio, 3),
             "insights": [
-                {"type": i.analyst_type, "direction": i.direction, 
+                {"type": i.analyst_type, "direction": i.direction,
                  "confidence": i.confidence, "reasoning": i.reasoning[:200]}
                 for i in insights
             ]
