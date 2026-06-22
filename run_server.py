@@ -47,7 +47,10 @@ from app import app, data_fetcher, analysis_engine, report_generator
 from modules.websocket_handler import WebSocketFundFlowHandler
 from modules.heatmap_generator import HeatmapGenerator
 from modules.alert_engine import AlertEngine
-from modules.alert_storage import AlertStorage
+try:
+    from modules.alert_storage import AlertStorage
+except ModuleNotFoundError:
+    from modules.experimental.alert_storage import AlertStorage
 
 # Reinitialize socketio with threading
 socketio = flask_socketio.SocketIO(app, cors_allowed_origins="*", async_mode='threading')
