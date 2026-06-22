@@ -607,27 +607,32 @@
             }
 
             const report = result.report;
+            const p = report.params || {};
             container.innerHTML = `
                 <div class="feature-grid">
                     <div class="feature-item">
-                        <div class="feature-name">Transformer-LSTM</div>
-                        <div class="feature-value">${report.models.transformer_lstm.d_model}d</div>
+                        <div class="feature-name">Model</div>
+                        <div class="feature-value">${report.model ? report.model.name : 'PatchTST'}</div>
                     </div>
                     <div class="feature-item">
-                        <div class="feature-name">Attention Heads</div>
-                        <div class="feature-value">${report.models.transformer_lstm.num_heads}</div>
+                        <div class="feature-name">Architecture</div>
+                        <div class="feature-value">${report.model ? report.model.architecture : 'Patch + Transformer + RoPE'}</div>
                     </div>
                     <div class="feature-item">
-                        <div class="feature-name">LSTM Hidden</div>
-                        <div class="feature-value">${report.models.transformer_lstm.lstm_hidden}</div>
+                        <div class="feature-name">d_model / n_heads</div>
+                        <div class="feature-value">${p.d_model || 128}d / ${p.n_heads || 8} heads</div>
                     </div>
                     <div class="feature-item">
-                        <div class="feature-name">GRU Hidden</div>
-                        <div class="feature-value">${report.models.attention_gru.hidden_dim}</div>
+                        <div class="feature-name">Layers / Dropout</div>
+                        <div class="feature-value">${p.n_layers || 4} layers / ${p.dropout || 0.1}</div>
                     </div>
                     <div class="feature-item">
-                        <div class="feature-name">Ensemble Method</div>
-                        <div class="feature-value">Weighted Avg</div>
+                        <div class="feature-name">Patch / SeqLen / Features</div>
+                        <div class="feature-value">patch=${p.patch_len || 8}, seq=${p.seq_len || 60}, feat=${p.n_features || 12}</div>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-name">Device</div>
+                        <div class="feature-value">${report.device || 'N/A'}</div>
                     </div>
                     <div class="feature-item">
                         <div class="feature-name">Model Trained</div>

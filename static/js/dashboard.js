@@ -999,22 +999,23 @@ async function loadDLV2Panel(code) {
 
         if (reportRes && reportRes.report) {
             const r = reportRes.report;
+            const p = r.params || {};
             dlHtml += `
                 <div class="dl-arch-layer">
                     <span class="dl-arch-icon">📥</span>
-                    <span>Input: Features (12 维)</span>
+                    <span>Input: ${p.n_features || 12} 维 × ${p.seq_len || 60} 步</span>
+                </div>
+                <div class="dl-arch-arrow">↓</div>
+                <div class="dl-arch-layer">
+                    <span class="dl-arch-icon">🧩</span>
+                    <span>Patch Embedding</span>
+                    <span class="dl-arch-detail">patch_len=${p.patch_len || 8}</span>
                 </div>
                 <div class="dl-arch-arrow">↓</div>
                 <div class="dl-arch-layer">
                     <span class="dl-arch-icon">🔀</span>
-                    <span>Transformer Encoder</span>
-                    <span class="dl-arch-detail">${r.models.transformer_lstm.d_model}d, ${r.models.transformer_lstm.num_heads} heads</span>
-                </div>
-                <div class="dl-arch-arrow">↓</div>
-                <div class="dl-arch-layer">
-                    <span class="dl-arch-icon">🔁</span>
-                    <span>LSTM Layer</span>
-                    <span class="dl-arch-detail">hidden=${r.models.transformer_lstm.lstm_hidden}</span>
+                    <span>Transformer Encoder (RoPE)</span>
+                    <span class="dl-arch-detail">${p.d_model || 128}d, ${p.n_heads || 8} heads, ${p.n_layers || 4} layers</span>
                 </div>
                 <div class="dl-arch-arrow">↓</div>
                 <div class="dl-arch-layer">
