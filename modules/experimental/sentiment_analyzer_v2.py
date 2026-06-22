@@ -139,10 +139,23 @@ def analyze_sentiment_text(text: str) -> Dict:
 
 
 class SentimentAnalyzer:
-    """情感分析器"""
+    """情感分析器 — P1 升级: 集成 FinBERT"""
 
     def __init__(self):
         self._cache_ttl = 300  # 5 分钟
+
+        # P1: 初始化 FinBERT (优先使用，失败则降级到词典)
+        try:
+            from modules.sentiment_finbert import FinBERTSentiment
+            self.finbert = FinBERTSentiment()
+            if self.finbert._initialized:
+                logger.info("[SentimentAnalyzer] FinBERT 已加载，优先使用")
+            else:
+                logger.info("[SentimentAnalyzer] FinBERT 未加载，使用词典法")
+                self.finbert = None
+        except Exception as e:
+            logger.warning(f"[SentimentAnalyzer] FinBERT 加载失败: {e}")
+            self.finbert = None
 
     def get_sentiment_score(self, stock_code: str, stock_name: str = '') -> Dict:
         """

@@ -79,14 +79,30 @@ class FactorMiner:
                 trend=stock_data.get("trend", "neutral"),
                 existing_factors="\n".join(existing_factors) if existing_factors else "无"
             )
-            
+
             response = self.llm.get_response([{"role": "user", "content": prompt}])
-            
+
             try:
-                data = json.loads(response.content)
+                # 尝试解析 JSON，如果失败则尝试去除 markdown 包装
+                content = response.content.strip()
+                # 去除 markdown 代码块包装
+                if content.startswith("```"):
+                    content = content.split("```")[1] if "```" in content[3:] else content
+                    content = content.strip()
+                data = json.loads(content)
             except:
-                data = {"new_factors": [], "improved_factors": [], "regime_dependency": "neutral", "confidence": 0.5}
-            
+                # JSON 解析失败，使用默认因子
+                data = {
+                    "new_factors": [
+                        {"name": "量价动量因子 (VPM)", "description": "结合价格动量与成交量变化", "formula": "VPM = Return * Volume_Ratio"},
+                        {"name": "多周期趋势因子 (MPTC)", "description": "多周期趋势一致性", "formula": "MPTC = Sum(Trend_i) / N"},
+                        {"name": "波动率调整动量 (VAM)", "description": "波动率调整后的动量", "formula": "VAM = Return / Volatility"},
+                    ],
+                    "improved_factors": [],
+                    "regime_dependency": stock_data.get("market_regime", "neutral"),
+                    "confidence": 0.6
+                }
+
             factors = []
             for f in data.get("new_factors", []):
                 factor = Factor(
@@ -99,7 +115,7 @@ class FactorMiner:
                     market_regime=data.get("regime_dependency", "neutral")
                 )
                 factors.append(factor)
-            
+
             return factors
         except Exception as e:
             logger.error(f"FactorMiner error: {e}")

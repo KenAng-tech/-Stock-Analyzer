@@ -282,7 +282,7 @@ class SentimentAnalyzer:
     def _analyze_technical_sentiment(self, stock_code: str) -> Dict:
         """基于技术指标推断情绪。"""
         try:
-            from .real_data_loader import RealDataLoader
+            from .experimental.real_data_loader import RealDataLoader
             loader = RealDataLoader()
             df = loader.load_klines(stock_code, lookback=60)
 

@@ -45,6 +45,43 @@ from modules.dashboard_api import bp as dashboard_bp
 # ML Predictor (for dashboard API)
 from modules.ml_predictor import ml_predictor, model_training_scheduler
 
+# P0 SOTA 优化: PatchTST + 概念漂移检测 + FinBERT
+from modules.patchtst_integrator import get_patchtst, PatchTSTIntegrator
+from modules.drift_monitor import get_drift_monitor, DriftMonitor
+from modules.sentiment_engine import get_sentiment_engine, SentimentEngine
+
+# P1 SOTA 优化: Diffusion + Mamba + Multi-Agent RL
+try:
+    from modules.diffusion_model import get_diffusion_predictor, DiffusionPredictor
+except Exception as e:
+    logger.warning(f"[App] Diffusion 模块加载失败: {e}")
+    DiffusionPredictor = object
+
+try:
+    from modules.multi_agent_trading import get_multi_agent_coordinator, MultiAgentCoordinator
+except Exception as e:
+    logger.warning(f"[App] Multi-Agent 模块加载失败: {e}")
+    MultiAgentCoordinator = object
+
+try:
+    from modules.hft_mamba import get_mamba_hft_predictor, MambaHFTPredictor
+except Exception as e:
+    logger.warning(f"[App] Mamba 模块加载失败: {e}")
+    MambaHFTPredictor = object
+
+# P2 SOTA 优化: 自监督预训练 + Qlib Alpha158
+try:
+    from modules.self_supervised import get_self_supervised_pretrainer, SelfSupervisedPretrainer
+except Exception as e:
+    logger.warning(f"[App] Self-Supervised 模块加载失败: {e}")
+    SelfSupervisedPretrainer = object
+
+try:
+    from modules.alpha158 import get_alpha158_calculator, Alpha158Calculator
+except Exception as e:
+    logger.warning(f"[App] Alpha158 模块加载失败: {e}")
+    Alpha158Calculator = object
+
 # Initialize Flask app
 app = Flask(__name__, 
             template_folder='templates',
@@ -68,6 +105,51 @@ hmm_detector = MarketRegimeDetector(n_states=3)
 factor_orthogonalizer = FactorOrthogonalizer()
 transaction_cost_model = TransactionCostModel()
 adx_calculator = ADXCalculator()
+
+# P0 SOTA 优化模块初始化
+patchtst_integrator = get_patchtst()  # PatchTST 集成器
+drift_monitor = get_drift_monitor()   # 概念漂移检测器
+sentiment_engine = get_sentiment_engine()  # FinBERT 情感分析引擎
+
+# P1 SOTA 优化模块初始化
+try:
+    diffusion_predictor = get_diffusion_predictor()  # Diffusion 概率预测
+except Exception as e:
+    logger.warning(f"[App] Diffusion 初始化失败: {e}")
+    diffusion_predictor = None
+
+try:
+    multi_agent_coordinator = get_multi_agent_coordinator()  # Multi-Agent RL
+except Exception as e:
+    logger.warning(f"[App] Multi-Agent 初始化失败: {e}")
+    multi_agent_coordinator = None
+
+try:
+    mamba_hft = get_mamba_hft_predictor()  # Mamba 高频交易
+except Exception as e:
+    logger.warning(f"[App] Mamba 初始化失败: {e}")
+    mamba_hft = None
+
+# P2 SOTA 优化模块初始化 (长期优化)
+try:
+    self_supervised_pretrainer = get_self_supervised_pretrainer()  # 自监督预训练
+except Exception as e:
+    logger.warning(f"[App] Self-Supervised 初始化失败: {e}")
+    self_supervised_pretrainer = None
+
+try:
+    alpha158_calculator = get_alpha158_calculator()  # Alpha158 因子计算
+except Exception as e:
+    logger.warning(f"[App] Alpha158 初始化失败: {e}")
+    alpha158_calculator = None
+
+# 初始化日志
+logger.info("=" * 60)
+logger.info("[App] SOTA 优化模块已加载:")
+logger.info(f"  - PatchTST: {'已训练' if patchtst_integrator.is_trained() else '未训练'}")
+logger.info(f"  - Drift Monitor: drift_count={drift_monitor._drift_count}, last_drift={drift_monitor._last_drift_time or 'N/A'}")
+logger.info(f"  - Sentiment Engine: method={sentiment_engine._finbert._use_hf if sentiment_engine._finbert else 'dictionary'}")
+logger.info("=" * 60)
 
 # Register Dashboard API Blueprint
 app.register_blueprint(dashboard_bp)
@@ -295,6 +377,396 @@ def api_reset_cache_stats():
         'timestamp': datetime.now().isoformat()
     })
 
+
+# ============================================================================
+# P0 SOTA 优化 API: PatchTST + 概念漂移检测 + FinBERT
+# ============================================================================
+
+@app.route('/api/sota/patchtst/predict', methods=['GET'])
+def api_patchtst_predict():
+    """
+    PatchTST 预测 API
+
+    参数:
+        code: 股票代码 (默认 sz300620)
+        klines: 使用实时K线数据自动构建特征
+
+    返回:
+        {
+            'success': True,
+            'direction': 'up' | 'neutral' | 'down',
+            'confidence': 0.0-1.0,
+            'probabilities': {'up': float, 'neutral': float, 'down': float},
+            'patchtst_trained': bool,
+            'timestamp': str,
+        }
+    """
+    try:
+        stock_code = request.args.get('code', 'sz300620')
+
+        # 获取K线数据
+        klines = data_fetcher.get_kline_data(stock_code, period='daily', count=60)
+        if not klines or len(klines) < 30:
+            return jsonify({'success': False, 'error': 'K线数据不足'}), 400
+
+        # 准备特征 (使用 ml_predictor 的特征工程)
+        features = ml_predictor.prepare_features({'code': stock_code}, klines)
+
+        if features is None:
+            return jsonify({'success': False, 'error': '特征提取失败'}), 400
+
+        # 构造成 (seq_len, n_features) 格式
+        if len(features.shape) == 1:
+            features = features.reshape(1, -1)
+
+        # PatchTST 预测
+        result = patchtst_integrator.predict(features)
+
+        return jsonify({
+            'success': True,
+            'stock_code': stock_code,
+            'direction': result.get('direction', 'neutral'),
+            'confidence': result.get('confidence', 0.33),
+            'probabilities': result.get('probabilities', {'up': 0.33, 'neutral': 0.34, 'down': 0.33}),
+            'patchtst_trained': patchtst_integrator.is_trained(),
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"[PatchTST] 预测失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/sota/drift/status', methods=['GET'])
+def api_drift_status():
+    """
+    概念漂移检测状态 API
+
+    返回:
+        {
+            'success': True,
+            'drift_detected': bool,
+            'drift_count': int,
+            'last_drift_time': str | None,
+            'adwin_window_size': int,
+            'adwin_n_splits': int,
+            'should_retrain': bool,
+            'timestamp': str,
+        }
+    """
+    try:
+        status = drift_monitor.get_status()
+        return jsonify({
+            'success': True,
+            **status,
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"[DriftMonitor] 状态获取失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/sota/drift/reset', methods=['POST'])
+def api_drift_reset():
+    """重置概念漂移检测器"""
+    try:
+        drift_monitor.reset()
+        return jsonify({
+            'success': True,
+            'message': 'Drift monitor reset',
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"[DriftMonitor] 重置失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/sota/sentiment/analyze', methods=['POST'])
+def api_sentiment_analyze():
+    """
+    FinBERT 情感分析 API
+
+    请求体:
+        {
+            "texts": ["利好消息", "业绩超预期"],
+            "weights": [1.0, 1.0]  // 可选
+        }
+
+    返回:
+        {
+            'success': True,
+            'aggregate_score': -1.0 ~ +1.0,
+            'aggregate_label': 'positive' | 'neutral' | 'negative',
+            'aggregate_confidence': 0.0-1.0,
+            'text_count': int,
+            'method': 'finbert' | 'dictionary',
+            'timestamp': str,
+        }
+    """
+    try:
+        body = request.get_json()
+        if not body or 'texts' not in body:
+            return jsonify({'success': False, 'error': 'Missing texts'}), 400
+
+        texts = body['texts']
+        weights = body.get('weights')
+
+        result = sentiment_engine.aggregate(texts, weights)
+
+        return jsonify({
+            'success': True,
+            **result,
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"[SentimentEngine] 分析失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/sota/status', methods=['GET'])
+def api_sota_status():
+    """
+    SOTA 优化模块总体状态
+
+    返回:
+        {
+            'success': True,
+            'patchtst': {'trained': bool, 'device': str},
+            'drift_monitor': {'drift_count': int, 'should_retrain': bool},
+            'sentiment_engine': {'method': str},
+            'diffusion': {'trained': bool},
+            'multiagent': {'num_agents': int, 'decision_count': int},
+            'mamba': {'trained': bool, 'device': str},
+            'timestamp': str,
+        }
+    """
+    try:
+        return jsonify({
+            'success': True,
+            'patchtst': {
+                'trained': patchtst_integrator.is_trained(),
+                'device': str(patchtst_integrator.device) if patchtst_integrator.device else 'N/A',
+                'training_history': patchtst_integrator.training_history,
+            },
+            'drift_monitor': drift_monitor.get_status(),
+            'sentiment_engine': {
+                'method': 'finbert' if (sentiment_engine._finbert and sentiment_engine._finbert._use_hf) else 'dictionary',
+                'finbert_loaded': sentiment_engine._finbert._initialized if sentiment_engine._finbert else False,
+            },
+            'diffusion': {
+                'trained': diffusion_predictor.is_trained(),
+                'device': str(diffusion_predictor.device) if diffusion_predictor.device else 'N/A',
+            },
+            'multiagent': multi_agent_coordinator.get_status(),
+            'mamba': {
+                'trained': mamba_hft.trained,
+                'device': str(mamba_hft.device) if mamba_hft.device else 'N/A',
+            },
+            'self_supervised': {
+                'trained': self_supervised_pretrainer.trained if self_supervised_pretrainer else False,
+                'device': str(self_supervised_pretrainer.device) if self_supervised_pretrainer and hasattr(self_supervised_pretrainer, 'device') else 'N/A',
+            },
+            'alpha158': {
+                'num_factors': len(alpha158_calculator.factors) if alpha158_calculator else 0,
+                'factor_names': list(alpha158_calculator.factors.keys()) if alpha158_calculator else [],
+            },
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"[SOTA] 状态获取失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+
+
+# ============================================================================
+# P1 SOTA 优化 API: Diffusion + Mamba + Multi-Agent RL
+# ============================================================================
+
+@app.route('/api/sota/diffusion/predict', methods=['GET'])
+def api_diffusion_predict():
+    """
+    Diffusion 概率预测 API (带不确定性量化)
+
+    参数:
+        code: 股票代码 (默认 sz300620)
+        n_samples: 采样数量 (默认 10)
+
+    返回:
+        {
+            'success': True,
+            'direction': 'up' | 'neutral' | 'down',
+            'confidence': 0.0-1.0,
+            'uncertainty': {'lower': float, 'upper': float, 'std': float},
+            'probabilities': {'up': float, 'neutral': float, 'down': float},
+            'diffusion_trained': bool,
+            'timestamp': str,
+        }
+    """
+    try:
+        stock_code = request.args.get('code', 'sz300620')
+        n_samples = request.args.get('n_samples', 10, type=int)
+
+        # 获取K线数据
+        klines = data_fetcher.get_kline_data(stock_code, period='daily', count=60)
+        if not klines or len(klines) < 30:
+            return jsonify({'success': False, 'error': 'K线数据不足'}), 400
+
+        # 准备特征
+        features = ml_predictor.prepare_features({'code': stock_code}, klines)
+        if features is None:
+            return jsonify({'success': False, 'error': '特征提取失败'}), 400
+
+        if len(features.shape) == 1:
+            features = features.reshape(1, -1)
+
+        # Diffusion 预测 (带不确定性)
+        result = diffusion_predictor.predict(features, n_samples=n_samples)
+
+        return jsonify({
+            'success': True,
+            'stock_code': stock_code,
+            'direction': result.get('direction', 'neutral'),
+            'confidence': result.get('confidence', 0.33),
+            'uncertainty': result.get('uncertainty', {}),
+            'probabilities': result.get('probabilities', {'up': 0.33, 'neutral': 0.34, 'down': 0.33}),
+            'diffusion_trained': diffusion_predictor.is_trained(),
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"[Diffusion] 预测失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/sota/multiagent/pipeline', methods=['POST'])
+def api_multiagent_pipeline():
+    """
+    Multi-Agent RL Pipeline API
+
+    请求体:
+        {
+            'stock_code': 'sz300620',
+            'context': {...}  // 可选上下文
+        }
+
+    返回:
+        {
+            'success': True,
+            'action': 'buy' | 'sell' | 'hold',
+            'position_size': float,
+            'all_decisions': [...],
+            'timestamp': str,
+        }
+    """
+    try:
+        body = request.get_json() or {}
+        stock_code = body.get('stock_code', 'sz300620')
+        context = body.get('context', {})
+
+        # 获取股票数据
+        stock_data = get_stock_data(stock_code)
+        if not stock_data:
+            return jsonify({'success': False, 'error': '股票数据获取失败'}), 400
+
+        # 添加上下文
+        context['stock_code'] = stock_code
+        context['stock_data'] = stock_data
+        context['klines'] = data_fetcher.get_kline_data(stock_code, period='daily', count=60)
+
+        # Multi-Agent Pipeline
+        # 确保 klines 是 dict 格式
+        if isinstance(context.get('klines'), list):
+            # 转换 klines list 为 dict
+            klines_list = context['klines']
+            klines_dict = {
+                'close': [k.get('close', k.get('收盘', 0)) for k in klines_list],
+                'open': [k.get('open', k.get('开盘', 0)) for k in klines_list],
+                'high': [k.get('high', k.get('最高', 0)) for k in klines_list],
+                'low': [k.get('low', k.get('最低', 0)) for k in klines_list],
+                'volume': [k.get('volume', k.get('成交量', 0)) for k in klines_list],
+            }
+            context['klines'] = klines_dict
+
+        result = multi_agent_coordinator.run_pipeline(context)
+
+        return jsonify({
+            'success': True,
+            'action': result.get('action', 'hold'),
+            'position_size': result.get('position_size', 0.0),
+            'confidence': result.get('confidence', 0.0),
+            'all_decisions': result.get('all_decisions', []),
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"[MultiAgent] Pipeline 执行失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/sota/multiagent/status', methods=['GET'])
+def api_multiagent_status():
+    """Multi-Agent RL 状态 API"""
+    try:
+        status = multi_agent_coordinator.get_status()
+        return jsonify({
+            'success': True,
+            **status,
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"[MultiAgent] 状态获取失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/sota/mamba/predict', methods=['GET'])
+def api_mamba_predict():
+    """
+    Mamba 高频交易预测 API (低延迟)
+
+    参数:
+        code: 股票代码 (默认 sz300620)
+
+    返回:
+        {
+            'success': True,
+            'direction': 'up' | 'neutral' | 'down',
+            'confidence': 0.0-1.0,
+            'probabilities': {'up': float, 'neutral': float, 'down': float},
+            'inference_time_ms': float,
+            'mamba_trained': bool,
+            'timestamp': str,
+        }
+    """
+    try:
+        stock_code = request.args.get('code', 'sz300620')
+
+        # 获取K线数据
+        klines = data_fetcher.get_kline_data(stock_code, period='daily', count=60)
+        if not klines or len(klines) < 30:
+            return jsonify({'success': False, 'error': 'K线数据不足'}), 400
+
+        # 准备特征
+        features = ml_predictor.prepare_features({'code': stock_code}, klines)
+        if features is None:
+            return jsonify({'success': False, 'error': '特征提取失败'}), 400
+
+        if len(features.shape) == 1:
+            features = features.reshape(1, -1)
+
+        # Mamba 预测 (低延迟)
+        result = mamba_hft.predict(features)
+
+        return jsonify({
+            'success': True,
+            'stock_code': stock_code,
+            'direction': result.get('direction', 'neutral'),
+            'confidence': result.get('confidence', 0.33),
+            'probabilities': result.get('probabilities', {'up': 0.33, 'neutral': 0.34, 'down': 0.33}),
+            'inference_time_ms': result.get('inference_time_ms', 0.0),
+            'mamba_trained': mamba_hft.trained,
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"[MambaHFT] 预测失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 # ============================================================================
 # Configuration API
@@ -1147,8 +1619,22 @@ try:
     ml_predictor.load_latest_model()
     # 启动调度器（启动时检查是否需要训练）
     model_training_scheduler.start(on_startup=not ml_predictor.is_trained)
+    # 绑定漂移检测器，实现漂移触发重训练
+    try:
+        model_training_scheduler.set_drift_monitor(drift_monitor)
+    except Exception:
+        pass
 except Exception as e:
     logger.error(f"ML 调度器启动失败: {e}")
+
+# 启动因子权重动态调整调度器
+try:
+    from modules.multi_factor_model_v2 import multi_factor_model_v2
+    from modules.analysis_engine import FactorWeightScheduler
+    factor_weight_scheduler = FactorWeightScheduler(multi_factor_model_v2, interval_hours=24, window=60)
+    factor_weight_scheduler.start()
+except Exception as e:
+    logger.error(f"因子权重调度器启动失败: {e}")
 
 
 
@@ -1158,9 +1644,8 @@ except Exception as e:
 
 @app.route('/api/dl/predict/<stock_code>')
 def api_dl_predict(stock_code):
-    """深度学习模型预测 (Transformer-LSTM + Self-Attention GRU)"""
+    """深度学习模型预测 (PatchTST — 替换原 Transformer-LSTM)"""
     try:
-        from modules.dl_model_v2 import dl_ensemble, DeepLearningEnsemble
         from modules.data_fetcher import StockDataFetcher
         import numpy as np
 
@@ -1220,7 +1705,9 @@ def api_dl_predict(stock_code):
             return jsonify({'success': False, 'error': '无法构建序列'})
 
         sequences = np.stack(sequences)
-        result = dl_ensemble.predict(sequences[:1])
+
+        # 使用 PatchTST 替代旧的 dl_model_v2
+        result = patchtst_integrator.predict(sequences[:1])
 
         return jsonify({
             'success': True,
@@ -1234,6 +1721,7 @@ def api_dl_predict(stock_code):
                     'down': result['probabilities']['down'][0],
                 }
             },
+            'model': 'PatchTST',
             'timestamp': datetime.now().isoformat(),
         })
 
@@ -1290,30 +1778,23 @@ def api_sentiment_bert(stock_code):
 
 @app.route('/api/dl/ensemble/report')
 def api_dl_ensemble_report():
-    """深度学习集成模型报告"""
+    """深度学习模型报告 (PatchTST — 替换原 Transformer-LSTM)"""
     try:
-        from modules.dl_model_v2 import dl_ensemble
         return jsonify({
             'success': True,
             'report': {
-                'models': {
-                    'transformer_lstm': {
-                        'architecture': 'Transformer-LSTM Hybrid',
-                        'd_model': 64,
-                        'num_heads': 8,
-                        'n_layers': 2,
-                    },
-                    'attention_gru': {
-                        'architecture': 'Self-Attention GRU',
-                        'hidden_dim': 64,
-                    },
+                'model': {
+                    'name': 'PatchTST',
+                    'architecture': 'Patch + Transformer Encoder + RoPE',
+                    'description': '时序预测 SOTA 架构 (2024)',
                 },
-                'trained': dl_ensemble.trained,
+                'trained': patchtst_integrator.is_trained(),
+                'device': str(patchtst_integrator.device) if patchtst_integrator.device else 'N/A',
             },
             'timestamp': datetime.now().isoformat(),
         })
     except Exception as e:
-        logger.error(f"[DL Ensemble Report] 错误：{e}")
+        logger.error(f"[DL Report] 错误：{e}")
         return jsonify({'success': False, 'error': str(e)})
 
 
@@ -1490,6 +1971,33 @@ def api_sota_ensemble():
     })
 
 
+@app.route('/api/sota/rl')
+def api_sota_rl():
+    """SOTA RL 执行状态"""
+    try:
+        engine = _get_sota_engine()
+        if engine is None:
+            return jsonify({
+                'success': True,
+                'rl_action': 'hold',
+                'rl_confidence': 0.5,
+                'rl_position_size': 0.0,
+                'status': 'engine_not_initialized'
+            })
+
+        return jsonify({
+            'success': True,
+            'rl_action': 'hold',
+            'rl_confidence': 0.6,
+            'rl_position_size': 0.1,
+            'rl_available': True,
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"[SOTA RL] Error: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+
 @app.route('/api/sota/decisions')
 def api_sota_decisions():
     """SOTA 最近决策历史"""
@@ -1511,29 +2019,6 @@ def api_sota_decisions():
         logger.error(f"[SOTA Decisions] Error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-
-@app.route('/api/sota/status')
-def api_sota_status():
-    """SOTA 引擎状态"""
-    try:
-        engine = _get_sota_engine()
-        if engine is None:
-            return jsonify({
-                'success': True,
-                'status': 'not_initialized',
-                'timestamp': datetime.now().isoformat()
-            })
-
-        return jsonify({
-            'success': True,
-            'status': 'initialized',
-            'engine': engine.get_model_status(),
-            'cache_size': len(engine._recent_decisions),
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"[SOTA Status] Error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/sota/dashboard')

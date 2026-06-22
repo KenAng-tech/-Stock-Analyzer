@@ -97,17 +97,18 @@ class EnhancedFeatures:
         return 0.0
 
     def _garch_vol_proxy(self, stock_data: Dict, klines: Optional[List[Dict]] = None) -> float:
-        """GARCH(1,1) 波动率代理"""
+        """GARCH(1,1) 波动率代理 (委托给 garch_volatility.py)"""
         if klines and len(klines) >= 30:
-            closes = np.array([float(k.get('close', 0)) for k in klines[-30:] if float(k.get('close', 0)) > 0])
-            if len(closes) >= 2:
-                returns = np.diff(np.log(closes))
-                # Simple GARCH(1,1) proxy: omega=1e-8, alpha=0.1, beta=0.85
-                omega, alpha, beta = 1e-8, 0.1, 0.85
-                var = np.mean(returns ** 2)
-                for r in returns[1:]:
-                    var = omega + alpha * r**2 + beta * var
-                return float(np.sqrt(var) * np.sqrt(252) * 100)
+            try:
+                from modules.garch_volatility import GARCHVolatility
+                closes = np.array([float(k.get('close', 0)) for k in klines[-60:] if float(k.get('close', 0)) > 0])
+                if len(closes) >= 30:
+                    returns = np.diff(np.log(closes)).tolist()
+                    garch = GARCHVolatility(omega=1e-6, alpha=0.05, beta=0.94)
+                    forecast = garch.forecast_volatility(returns, steps_ahead=1)
+                    return float(forecast * 100)  # 转为百分比
+            except Exception as e:
+                logger.debug(f"[EnhancedFeatures] GARCH 计算失败: {e}")
         return 0.0
 
     # ── 流动性类 ──

@@ -35,16 +35,14 @@ SOTA References:
 - QuantaAlpha (SUFE, 2026-02) - LLM Factor Mining
 """
 
-import json
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from typing import Dict, List, Optional, Any
+from typing import Dict, List
 from dataclasses import dataclass, field
 
 from modules.logger import logger
 from modules.llm_agents.llm_client import LLMClient
-from modules.llm_agents.agent_coordinator import AgentCoordinator, AgentDecision
+from modules.llm_agents.agent_coordinator import AgentCoordinator
 from modules.factor_mining.factor_mining import FactorMiningEngine
 from modules.multi_modal.cross_modal import MultiModalEngine
 
@@ -90,16 +88,16 @@ class SOTAIntegrationEngine:
     
     def __init__(self, config: Dict = None):
         self.config = config or {}
-        
+
         # 初始化 LLM 客户端
         llm_config = {
-            "omlx_url": self.config.get("omlx_url", "http://127.0.0.1:8080"),
-            "omlx_model": self.config.get("omlx_model", "default"),
-            "omlx_timeout": 10.0,  # 降低 OMLX 超时以加速降级
+            "omlx_url": self.config.get("omlx_url", "http://127.0.0.1:8082"),
+            "omlx_model": self.config.get("omlx_model", "MiniMax-M2.7-4bit-mxfp4"),
+            "omlx_timeout": 120.0,  # 2分钟超时 (模型加载慢)
             "openai_key": self.config.get("openai_key", ""),
             "anthropic_key": self.config.get("anthropic_key", ""),
-            "failure_threshold": 2,  # 降低熔断阈值
-            "recovery_timeout": 10.0,
+            "failure_threshold": 3,  # 熔断阈值
+            "recovery_timeout": 30.0,
         }
         self.llm_client = LLMClient(llm_config)
         

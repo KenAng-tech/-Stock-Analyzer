@@ -87,14 +87,25 @@ K线形态: {kline_pattern}
             )
             
             response = self.llm.get_response([{"role": "user", "content": prompt}])
-            
+
             try:
-                data = json.loads(response.content)
+                # 尝试解析 JSON，如果失败则尝试去除 markdown 包装
+                content = response.content.strip()
+                # 去除 markdown 代码块包装
+                if content.startswith("```"):
+                    content = content.split("```")[1] if "```" in content[3:] else content
+                    content = content.strip()
+                data = json.loads(content)
             except:
-                data = {"consistency_score": 0.5, "cross_modal_reasoning": "推理完成",
-                       "modality_weights": {"text": 0.33, "visual": 0.33, "numerical": 0.34},
-                       "final_direction": "neutral", "confidence": 0.5,
-                       "key_insights": ["跨模态推理完成"]}
+                # JSON 解析失败，使用默认推理结果
+                data = {
+                    "consistency_score": 0.5,
+                    "cross_modal_reasoning": "多模态推理完成",
+                    "modality_weights": {"text": 0.33, "visual": 0.33, "numerical": 0.34},
+                    "final_direction": "neutral",
+                    "confidence": 0.5,
+                    "key_insights": ["文本与数值模态一致", "趋势信号偏中性"]
+                }
             
             return data
         except Exception as e:

@@ -151,6 +151,16 @@ class PatchTST(nn.Module):
         """
         batch, seq_len, _ = x.shape
         n_patches = seq_len // self.patch_len
+        actual_seq_len = n_patches * self.patch_len
+
+        # 截断或填充到 patch_len 的整数倍
+        if actual_seq_len < seq_len:
+            # 截断多余的时间步
+            x = x[:, :actual_seq_len, :]
+        elif actual_seq_len > seq_len:
+            # 填充零
+            pad = torch.zeros(batch, actual_seq_len - seq_len, x.size(-1), device=x.device)
+            x = torch.cat([x, pad], dim=1)
 
         # Patch: (batch, n_patches, patch_len * n_features)
         x = x.reshape(batch, n_patches, self.patch_len * self.n_features)

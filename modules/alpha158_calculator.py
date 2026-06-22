@@ -462,3 +462,7 @@ class Alpha158Calculator:
     def get_factor_list(self) -> List[str]:
         """获取因子名称列表"""
         return self.factor_names
+
+
+# 全局实例
+alpha158_calculator = Alpha158Calculator()

@@ -13,12 +13,13 @@
 
 import hashlib
 import numpy as np
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from typing import Dict, List, Optional
 import warnings
 warnings.filterwarnings('ignore')
 
 from modules.dynamic_cache import cache
+from modules.logger import logger
+from modules.alpha158_calculator import alpha158_calculator
 
 
 class MultiFactorModelV2:
@@ -34,6 +35,10 @@ class MultiFactorModelV2:
         'quality': ['roe_quality', 'revenue_growth_quality', 'margin_quality'],
         'technical': ['rsi_technical', 'macd_slope', 'bollinger_position', 'trend_strength'],
         'sentiment': ['price_sentiment', 'volume_sentiment'],
+        'fund_flow': ['northbound_flow'],
+        'leverage': ['margin_balance_ratio'],
+        'analyst': ['analyst_rating_change'],
+        'macro': ['macro_liquidity_proxy'],
     }
 
     # 默认因子权重
@@ -48,6 +53,7 @@ class MultiFactorModelV2:
         'market_cap_value': 0.04,
         'realized_vol': 0.05,
         'downside_vol': 0.04,
+        'garch_vol': 0.04,
         'volume_ratio': 0.07,
         'volume_momentum': 0.05,
         'outer_inner_ratio': 0.06,
@@ -59,6 +65,10 @@ class MultiFactorModelV2:
         'bollinger_position': 0.04,
         'trend_strength': 0.05,
         'price_sentiment': 0.03,
+        'northbound_flow': 0.04,
+        'margin_balance_ratio': 0.03,
+        'analyst_rating_change': 0.04,
+        'macro_liquidity_proxy': 0.03,
     }
 
     def __init__(self):
@@ -151,6 +161,24 @@ class MultiFactorModelV2:
                     dvol = float(np.std(downside) * np.sqrt(252) * 100)
                     return max(0, min(10, 10 - dvol / 3))
         return 5.0
+
+    def garch_vol(self, stock_data: Dict, klines: Optional[List[Dict]] = None) -> float:
+        """GARCH(1,1) 条件波动率（越低越好，预测未来波动）"""
+        if klines and len(klines) >= 60:
+            closes = np.array([float(k['close']) for k in klines[-60:] if float(k.get('close', 0)) > 0])
+            if len(closes) >= 30:
+                try:
+                    from modules.garch_volatility import GARCHVolatility
+                    returns = np.diff(np.log(closes)).tolist()
+                    garch = GARCHVolatility(omega=1e-6, alpha=0.05, beta=0.94)
+                    forecast = garch.forecast_volatility(returns, steps_ahead=1)
+                    # 年化波动率转为百分制（低波动得分高）
+                    vol_pct = forecast * 100
+                    return max(0, min(10, 10 - vol_pct / 10))
+                except Exception:
+                    pass
+        # 降级: 用 realized_vol 近似
+        return self.realized_vol(stock_data, klines)
 
     def volume_ratio(self, stock_data: Dict) -> float:
         """量比（外盘/内盘）"""
@@ -293,40 +321,96 @@ class MultiFactorModelV2:
         return 2.0
 
     # ─────────────────────────────────────────────
+    # 新增因子: 资金面 / 杠杆 / 分析师 / 宏观
+    # ─────────────────────────────────────────────
+
+    def northbound_flow(self, stock_data: Dict) -> float:
+        """北向资金净买入因子 (越高越好)
+
+        通过 AKShare 获取北向资金当日净买入额，标准化为 0-10 分。
+        降级: 用换手率变化代理资金活跃度。
+        """
+        # 优先使用 stock_data 中的北向数据
+        north_net = stock_data.get('northbound_net_flow', 0)  # 亿元
+        if north_net != 0:
+            #  sigmoid 映射: 0 → 5, +5亿 → ~8.8, -5亿 → ~1.2
+            return float(10 / (1 + np.exp(-north_net / 2)))
+
+        # 降级: 用换手率变化代理
+        turnover = stock_data.get('turnover', 5)
+        prev_turnover = stock_data.get('prev_turnover', turnover)
+        if prev_turnover > 0:
+            turnover_change = (turnover - prev_turnover) / prev_turnover
+            return max(0, min(10, 5 + turnover_change * 50))
+        return 5.0
+
+    def margin_balance_ratio(self, stock_data: Dict) -> float:
+        """融资融券余额占比因子 (杠杆情绪，过高看跌)
+
+        融资余额/流通市值 比值过高说明杠杆过热，反向指标。
+        降级: 用换手率代理。
+        """
+        margin_balance = stock_data.get('margin_balance', 0)  # 融资余额
+        float_cap = stock_data.get('float_market_cap', 1)  # 流通市值
+        if float_cap > 0 and margin_balance > 0:
+            ratio = margin_balance / float_cap
+            # ratio 通常 0.01-0.05, 越高越过热 → 得分越低
+            score = max(0, min(10, 10 - ratio * 500))
+            return score
+        # 降级: 无数据用中性分
+        return 5.0
+
+    def analyst_rating_change(self, stock_data: Dict) -> float:
+        """分析师评级变化因子 (上调看涨，下调看跌)
+
+        使用分析师评级均值变化 (1=强烈推荐 → 5=卖出)。
+        降级: 用营收增速代理基本面预期。
+        """
+        rating = stock_data.get('analyst_rating', 3)  # 1-5, 1=强烈推荐
+        rating_change = stock_data.get('analyst_rating_change', 0)  # 较上期变化 (+1=上调)
+
+        if rating_change != 0:
+            # 评级上调 → 高分
+            return max(0, min(10, 5 + rating_change * 3))
+
+        # 降级: 用营收增速
+        revenue_growth = stock_data.get('revenue_yoy', 0)
+        if revenue_growth > 30:
+            return 8.0
+        elif revenue_growth > 10:
+            return 6.0
+        elif revenue_growth > 0:
+            return 4.0
+        return 2.0
+
+    def macro_liquidity_proxy(self, stock_data: Dict) -> float:
+        """宏观流动性代理因子
+
+        使用市场整体成交额/换手率作为流动性 proxy。
+        流动性充裕 → 高分。
+        """
+        market_amount = stock_data.get('market_total_amount', 0)  # 全市场成交额 亿元
+        prev_amount = stock_data.get('prev_market_amount', 0)
+
+        if market_amount > 0 and prev_amount > 0:
+            # 成交额同比变化
+            amount_change = (market_amount - prev_amount) / prev_amount
+            # 成交额增加 → 流动性改善
+            return max(0, min(10, 5 + amount_change * 20))
+
+        # 降级: 用个股换手率
+        turnover = stock_data.get('turnover', 5)
+        return max(0, min(10, turnover / 2))
+
+    # ─────────────────────────────────────────────
     # 工具方法
     # ─────────────────────────────────────────────
 
     @staticmethod
     def _calculate_macd_histogram(closes: np.ndarray) -> float:
-        """计算 MACD 柱状图"""
-        if len(closes) < 35:
-            return 0.0
-
-        def ema(data, period):
-            if len(data) < period:
-                return float(np.mean(data))
-            multiplier = 2.0 / (period + 1)
-            result = float(data[0])
-            for price in data[1:]:
-                result = (price - result) * multiplier + result
-            return result
-
-        ema12 = ema(closes, 12)
-        ema26 = ema(closes, 26)
-        macd_line = ema12 - ema26
-
-        # 需要最近 9 个 MACD 值来计算 signal line
-        if len(closes) >= 35:
-            macd_values = []
-            for i in range(26, len(closes)):
-                e12 = ema(closes[:i+1], 12)
-                e26 = ema(closes[:i+1], 26)
-                macd_values.append(e12 - e26)
-            if len(macd_values) >= 9:
-                signal = ema(np.array(macd_values[-9:]), 9)
-                return float(macd_values[-1] - signal)
-
-        return float(macd_line * 0.1)
+        """计算 MACD 柱状图（委托给共享工具）"""
+        from modules.utils.technical import macd_histogram
+        return macd_histogram(closes)
 
     # ─────────────────────────────────────────────
     # 综合计算
@@ -346,9 +430,10 @@ class MultiFactorModelV2:
             'pe_value': self.pe_value(stock_data),
             'pb_value': self.pb_value(stock_data),
             'market_cap_value': self.market_cap_value(stock_data),
-            # 波动率因子 (2)
+            # 波动率因子 (3)
             'realized_vol': self.realized_vol(stock_data, klines),
             'downside_vol': self.downside_vol(stock_data, klines),
+            'garch_vol': self.garch_vol(stock_data, klines),
             # 成交量因子 (3)
             'volume_ratio': self.volume_ratio(stock_data),
             'volume_momentum': self.volume_momentum(stock_data),
@@ -365,7 +450,49 @@ class MultiFactorModelV2:
             'trend_strength': self.trend_strength(stock_data, klines),
             # 情绪因子 (1)
             'price_sentiment': self.price_sentiment(stock_data),
+            # 资金面因子 (1)
+            'northbound_flow': self.northbound_flow(stock_data),
+            # 杠杆因子 (1)
+            'margin_balance_ratio': self.margin_balance_ratio(stock_data),
+            # 分析师因子 (1)
+            'analyst_rating_change': self.analyst_rating_change(stock_data),
+            # 宏观因子 (1)
+            'macro_liquidity_proxy': self.macro_liquidity_proxy(stock_data),
         }
+
+    def calculate_all_factors_with_alpha158(self, stock_data: Dict,
+                                               klines: Optional[List[Dict]] = None) -> Dict[str, float]:
+        """
+        计算所有因子（包含 Alpha158 扩展因子）
+
+        扩展内容:
+        - 在原有 21 个因子基础上，增加 Alpha158 的 69 个因子
+        - 总计约 90 个因子
+
+        Returns:
+            {factor_name: factor_value} 因子字典
+        """
+        # 获取原有因子
+        base_factors = self.calculate_all_factors(stock_data, klines)
+
+        # 获取 Alpha158 因子
+        if klines and len(klines) >= 60:
+            try:
+                alpha_factors = alpha158_calculator.calculate_all(klines)
+                # 归一化 alpha 因子到 0-10 范围（与原有因子一致）
+                for name, value in alpha_factors.items():
+                    if isinstance(value, (int, float)) and not np.isnan(value) and not np.isinf(value):
+                        # 压缩到 0-10 范围
+                        normalized = float(np.clip(value * 5 + 5, 0, 10))
+                        base_factors[f'alpha158_{name}'] = normalized
+                    else:
+                        base_factors[f'alpha158_{name}'] = 5.0  # 中性值
+            except Exception as e:
+                logger.debug(f"[MultiFactorModelV2] Alpha158 计算失败: {e}")
+        else:
+            logger.debug(f"[MultiFactorModelV2] K 线数据不足，无法计算 Alpha158")
+
+        return base_factors
 
     @staticmethod
     def _factor_cache_key(stock_code: str, stock_data: Dict,
@@ -480,9 +607,10 @@ class MultiFactorModelV2:
             if np.std(fv) < 1e-10 or np.std(ret) < 1e-10:
                 continue
 
-            # Rank Spearman 相关系数
-            fv_rank = np.rank(fv)
-            ret_rank = np.rank(ret)
+            # Rank Spearman 相关系数 (使用 scipy.stats.rankdata 替代已弃用的 np.rank)
+            from scipy.stats import rankdata
+            fv_rank = rankdata(fv)
+            ret_rank = rankdata(ret)
             ic = np.corrcoef(fv_rank, ret_rank)[0, 1]
 
             if np.isnan(ic):

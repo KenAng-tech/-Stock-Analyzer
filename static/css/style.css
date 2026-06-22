@@ -1944,6 +1944,189 @@ body {
     display: block;
 }
 
+/* ---- SOTA 模型页面样式 ---- */
+.sota-decision-card {
+    background: rgba(30, 41, 59, 0.8);
+    border: 1px solid rgba(59, 130, 246, 0.2);
+    border-radius: 12px;
+    padding: 20px;
+}
+
+.sota-direction {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    border-radius: 8px;
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.sota-direction.bullish {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.sota-direction.bearish {
+    background: rgba(16, 185, 129, 0.15);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.sota-direction.neutral {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.sota-direction i {
+    font-size: 20px;
+}
+
+.sota-direction h4 {
+    margin: 0;
+    color: inherit;
+}
+
+.sota-metrics {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.metric {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    background: rgba(15, 23, 42, 0.6);
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.metric span:first-child {
+    color: #94a3b8;
+    font-size: 14px;
+}
+
+.metric span:last-child {
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.factors-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.factor-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    background: rgba(15, 23, 42, 0.6);
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.factor-item span:first-child {
+    color: #e2e8f0;
+    font-size: 14px;
+}
+
+.factor-item span:last-child {
+    color: #60a5fa;
+    font-size: 14px;
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.factor-count {
+    color: #94a3b8;
+    font-size: 13px;
+    margin-top: 12px;
+    text-align: right;
+}
+
+.cross-modal-card {
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid rgba(59, 130, 246, 0.2);
+    border-radius: 10px;
+    padding: 16px;
+}
+
+.cm-layer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 14px;
+    background: rgba(30, 41, 59, 0.6);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.cm-layer:last-child {
+    margin-bottom: 0;
+}
+
+.cm-layer span:first-child {
+    color: #94a3b8;
+    font-size: 14px;
+}
+
+.cm-layer span:last-child {
+    color: #60a5fa;
+    font-size: 16px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.status-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+}
+
+.status-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    background: rgba(15, 23, 42, 0.6);
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.status-item span:first-child {
+    color: #94a3b8;
+    font-size: 13px;
+}
+
+.status-item span:last-child {
+    color: #10b981;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.status-ok {
+    color: #10b981 !important;
+}
+
+.status-initialized {
+    color: #10b981 !important;
+}
+
+.status-error {
+    color: #ef4444 !important;
+}
+
 @keyframes spin {
     from { transform: rotate(0deg); }
     to { transform: rotate(360deg); }

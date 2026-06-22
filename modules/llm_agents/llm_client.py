@@ -443,11 +443,11 @@ class LLMClient:
 
     def _init_clients(self):
         """初始化所有可用的客户端"""
-        # OMLX (本地)
+        # OMLX (本地) — 使用 OMLX Proxy (port 8082)
         self.clients['omlx'] = OmlxClient(
-            base_url=self.config.get('omlx_url', 'http://127.0.0.1:8080'),
-            model=self.config.get('omlx_model', 'default'),
-            timeout=self.config.get('omlx_timeout', 30.0),
+            base_url=self.config.get('omlx_url', 'http://127.0.0.1:8082'),
+            model=self.config.get('omlx_model', 'MiniMax-M2.7-4bit-mxfp4'),
+            timeout=self.config.get('omlx_timeout', 120.0),  # 2分钟超时 (模型加载慢)
         )
 
         # OpenAI

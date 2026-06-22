@@ -374,8 +374,8 @@ class MLPredictor:
         self.model_dir = os.path.join(os.path.dirname(__file__), 'models')
         os.makedirs(self.model_dir, exist_ok=True)
 
-        # 交易成本（A 股往返约 0.15%）
-        self.transaction_cost = 0.0015
+        # 交易成本（A 股往返: 佣金0.03%*2 + 印花税0.1% + 滑点0.02% ≈ 0.35%）
+        self.transaction_cost = 0.0035
 
         # IC / 特征重要性
         self.factor_ic: Dict[str, float] = {}
@@ -550,42 +550,36 @@ class MLPredictor:
 
     @staticmethod
     def _ema(data: np.ndarray, period: int) -> float:
-        """计算 EMA 最后一个值"""
-        if len(data) < period:
-            return float(np.mean(data)) if len(data) > 0 else 0
-        multiplier = 2.0 / (period + 1)
-        ema = float(data[0])
-        for price in data[1:]:
-            ema = (price - ema) * multiplier + ema
-        return ema
+        """计算 EMA 最后一个值（委托给共享工具）"""
+        from modules.utils.technical import ema as _ema
+        return _ema(data, period)
 
     @staticmethod
     def _ema_array(data: np.ndarray, period: int) -> np.ndarray:
-        """计算完整 EMA 数组"""
-        if len(data) < period:
-            return data.astype(float)
-        multiplier = 2.0 / (period + 1)
-        ema = np.zeros(len(data))
-        ema[0] = float(data[0])
-        for i in range(1, len(data)):
-            ema[i] = (data[i] - ema[i - 1]) * multiplier + ema[i - 1]
-        return ema
+        """计算完整 EMA 数组（委托给共享工具）"""
+        from modules.utils.technical import ema_array as _ema_arr
+        return _ema_arr(data, period)
 
     # ── 标签创建（修复前视偏差） ──────────────────────────────
 
     def create_labels(self, klines: List[Dict], horizon: int = 5) -> np.ndarray:
-        """创建标签（考虑交易成本，修复前视偏差）"""
-        if len(klines) < horizon + 1:
+        """创建标签（考虑交易成本 + 动态阈值，修复前视偏差）"""
+        if len(klines) < horizon + 21:  # 至少需要20日历史计算波动率
             return np.array([])
 
         closes = np.array([k['close'] for k in klines], dtype=float)
-        labels = []
+        returns = np.diff(np.log(closes))
 
+        # 基于近期波动率的动态阈值（替代固定 2%）
+        rolling_vol = np.std(returns[-20:]) * np.sqrt(20)  # 20日年化波动率
+        base_threshold = max(0.005, rolling_vol * 0.5)     # 至少 0.5%，或波动率的一半
+
+        labels = []
         for i in range(len(closes) - horizon):
             future_return = (closes[i + horizon] - closes[i]) / closes[i]
             # 净收益 = 毛收益 - 交易成本（买入 + 卖出）
             net_return = future_return - self.transaction_cost
-            label = 1 if net_return > 0.02 else (-1 if net_return < -0.02 else 0)
+            label = 1 if net_return > base_threshold else (-1 if net_return < -base_threshold else 0)
             labels.append(label)
 
         return np.array(labels)
@@ -727,6 +721,50 @@ class MLPredictor:
         Returns:
             是否训练成功
         """
+        return self._train_stacking_internal(X, y, dates, incremental=False)
+
+    def incremental_train(self, X: np.ndarray, y: np.ndarray,
+                           dates: Optional[List[str]] = None) -> bool:
+        """
+        增量学习训练 — 在已有模型基础上用新数据微调
+
+        使用 LightGBM 的 init_model 参数实现增量学习。
+        适用于在线学习场景：每天用新数据微调模型。
+
+        Args:
+            X: 新特征矩阵 (n_samples, n_features)
+            y: 新标签数组 (n_samples,)
+            dates: 日期字符串列表
+
+        Returns:
+            是否训练成功
+        """
+        if not self.is_trained:
+            # 没有已有模型，退化为全量训练
+            logger.info("[MLPredictor] 模型未训练，退化为全量训练")
+            return self.train_stacking_ensemble(X, y, dates)
+
+        if len(X) < 60:
+            logger.warning(f"[MLPredictor] 增量学习数据不足: {len(X)}")
+            return False
+
+        return self._train_stacking_internal(X, y, dates, incremental=True)
+
+    def _train_stacking_internal(self, X: np.ndarray, y: np.ndarray,
+                                  dates: Optional[List[str]],
+                                  incremental: bool) -> bool:
+        """
+        Stacking 集成训练内部实现
+
+        Args:
+            X: 特征矩阵
+            y: 标签数组
+            dates: 日期列表
+            incremental: 是否增量学习
+
+        Returns:
+            是否训练成功
+        """
         # 对齐 X 和 y 的长度（prepare_features_batch 可能返回比 labels 更多的样本）
         n = min(len(X), len(y))
         if n < 60:
@@ -859,9 +897,20 @@ class MLPredictor:
                     X_seq_all, all_idx = self._generate_sequences(X, seq_len)
                     y_full_seq = y[all_idx]
                     model.fit(X_seq_all, y_full_seq)
+                elif incremental and name == 'lgb' and 'lgb' in self.models:
+                    # 增量学习: 用已有 LightGBM 模型作为初始模型
+                    init_model_path = self._save_lightgbm_temp(model)
+                    new_model = self._make_lightgbm()
+                    if new_model:
+                        new_model.fit(X, y, init_model=init_model_path)
+                        self.models[name] = new_model
+                        os.remove(init_model_path)
+                    else:
+                        model.fit(X, y)
+                        self.models[name] = model
                 else:
                     model.fit(X, y)
-                self.models[name] = model
+                    self.models[name] = model
             except Exception as e:
                 print(f"[MLPredictor] {name} 全量训练失败: {e}")
 
@@ -910,6 +959,20 @@ class MLPredictor:
             )
         except ImportError:
             return None
+
+    def _save_lightgbm_temp(self, model) -> str:
+        """将 LightGBM 模型保存到临时文件，用于 init_model
+
+        Args:
+            model: LightGBM 模型实例
+
+        Returns:
+            临时文件路径
+        """
+        import tempfile
+        tmp_path = os.path.join(self.model_dir, '_lgb_temp_model.txt')
+        model.booster_.save_model(tmp_path)
+        return tmp_path
 
     def _make_xgboost(self):
         """创建 XGBoost 模型"""
@@ -1486,17 +1549,15 @@ class FeatureEngineering:
 
     @staticmethod
     def _ema_arr(data: np.ndarray, period: int) -> np.ndarray:
-        ema = np.zeros_like(data)
-        ema[0] = data[0]
-        multiplier = 2 / (period + 1)
-        for i in range(1, len(data)):
-            ema[i] = (data[i] - ema[i-1]) * multiplier + ema[i-1]
-        return ema
+        """EMA 数组（委托给共享工具）"""
+        from modules.utils.technical import ema_array
+        return ema_array(data, period)
 
     @staticmethod
     def _rsi_arr(data: np.ndarray, period: int = 14) -> np.ndarray:
-        delta = np.diff(data)
-        gains = np.where(delta > 0, delta, 0)
+        """RSI 数组（委托给共享工具）"""
+        from modules.utils.technical import rsi_array
+        return rsi_array(data, period)
         losses = np.where(delta < 0, -delta, 0)
         avg_gain = np.zeros_like(data)
         avg_loss = np.zeros_like(data)
@@ -1661,9 +1722,34 @@ class ModelTrainingScheduler:
             logger.info("[ModelTrainingScheduler] 定时重训练触发")
             self._train_and_schedule()
 
+    def set_drift_monitor(self, drift_monitor):
+        """设置漂移检测器（可选），用于漂移触发重训练
+
+        Args:
+            drift_monitor: DriftMonitor 实例
+        """
+        self._drift_monitor = drift_monitor
+        logger.info("[ModelTrainingScheduler] 已绑定漂移检测器")
+
     def _train_and_schedule(self):
         """训练模型并设置下一次调度"""
+        self._train_and_schedule_with_drift()
+
+    def _train_and_schedule_with_drift(self):
+        """训练模型并设置下一次调度（含漂移检测）"""
         try:
+            # 检查漂移是否需要紧急重训练
+            if hasattr(self, '_drift_monitor'):
+                if self._drift_monitor.should_retrain():
+                    logger.info("[ModelTrainingScheduler] 漂移检测触发紧急重训练")
+                    result = self._train_for_stock('sz300620')
+                    self._last_train_result = result
+                    # 重置漂移计数器避免重复触发
+                    if hasattr(self._drift_monitor, 'reset'):
+                        self._drift_monitor.reset()
+                    self._schedule_next()
+                    return
+
             # 默认训练 sz300620
             result = self._train_for_stock('sz300620')
             self._last_train_result = result
@@ -1730,6 +1816,91 @@ class ModelTrainingScheduler:
 
         except Exception as e:
             logger.error(f"[ModelTrainingScheduler] 训练异常: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {'success': False, 'error': str(e)}
+
+    def batch_train_stocks(self, stock_codes: List[str], incremental: bool = False) -> Dict:
+        """批量训练多只股票的模型
+
+        Args:
+            stock_codes: 股票代码列表
+            incremental: 是否使用增量学习
+
+        Returns:
+            批量训练结果
+        """
+        results = {}
+        for code in stock_codes:
+            try:
+                if incremental and self.predictor.is_trained:
+                    result = self._train_for_stock_incremental(code)
+                else:
+                    result = self._train_for_stock(code)
+                results[code] = result
+            except Exception as e:
+                logger.error(f"[ModelTrainingScheduler] 批量训练 {code} 失败: {e}")
+                results[code] = {'success': False, 'error': str(e)}
+
+        success_count = sum(1 for r in results.values() if r.get('success'))
+        logger.info(f"[ModelTrainingScheduler] 批量训练完成: {success_count}/{len(stock_codes)} 成功")
+        return results
+
+    def _train_for_stock_incremental(self, stock_code: str) -> Dict:
+        """为指定股票进行增量学习训练
+
+        Args:
+            stock_code: 股票代码
+
+        Returns:
+            训练结果
+        """
+        try:
+            from modules.data_fetcher import StockDataFetcher
+
+            fetcher = StockDataFetcher()
+            stock_data = fetcher.get_stock_info(stock_code)
+            klines = fetcher.get_kline_data(stock_code, 'daily', 100)  # 增量学习只需近期数据
+
+            if not klines or len(klines) < 30:
+                return {'success': False, 'message': f'K 线数据不足: {len(klines) if klines else 0} 根'}
+
+            if not stock_data:
+                return {'success': False, 'message': '无法获取股票数据'}
+
+            features = self.predictor.prepare_features(stock_data, klines)
+            if features is None:
+                return {'success': False, 'message': '特征准备失败'}
+
+            labels = self.predictor.create_labels(klines, horizon=5)
+            if len(labels) < 30:
+                return {'success': False, 'message': f'标签不足: {len(labels)}'}
+
+            full_features = self.predictor.prepare_features_batch(klines, labels)
+            if full_features is None or len(full_features) < 60:
+                return {'success': False, 'message': f'完整特征不足: {len(full_features) if full_features else 0}'}
+
+            dates = [klines[i].get('date', f'day_{i}') for i in range(len(klines))]
+
+            # 增量学习
+            success = self.predictor.incremental_train(full_features, labels, dates=dates)
+
+            if success and self.predictor.is_trained:
+                path = self.predictor.save_model()
+                return {
+                    'success': True,
+                    'stock_code': stock_code,
+                    'method': 'incremental',
+                    'cv_score': self.predictor.cv_score,
+                    'models': list(self.predictor.models.keys()),
+                    'path': path,
+                    'trained_at': self.predictor._trained_at,
+                }
+            else:
+                return {'success': False, 'message': '增量学习失败'}
+
+        except Exception as e:
+            logger.error(f"[ModelTrainingScheduler] 增量训练异常: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return {'success': False, 'error': str(e)}

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Stock Analyzer - 股票深度分析系统</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=9">
+    <link rel="stylesheet" href="/static/css/style.css?v=10">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
@@ -1128,12 +1128,14 @@
             .then(r => r.json())
             .then(data => {
                 if (data.success) {
-                    const cm = data.analysis;
+                    const cm = data.analysis || {};
                     document.getElementById('sota-cross-modal').innerHTML = `
                         <div class="cross-modal-card">
-                            <div class="cm-layer"><span>文本层</span><span>${cm.text_score?.toFixed(2) || 'N/A'}</span></div>
-                            <div class="cm-layer"><span>数值层</span><span>${cm.numeric_score?.toFixed(2) || 'N/A'}</span></div>
-                            <div class="cm-layer"><span>一致性</span><span>${cm.consistency_score?.toFixed(2) || 'N/A'}</span></div>
+                            <div class="cm-layer"><span>方向</span><span>${cm.direction || 'N/A'}</span></div>
+                            <div class="cm-layer"><span>置信度</span><span>${cm.confidence ? (cm.confidence * 100).toFixed(0) + '%' : 'N/A'}</span></div>
+                            <div class="cm-layer"><span>一致性</span><span>${cm.score ? (cm.score * 100).toFixed(0) + '%' : 'N/A'}</span></div>
+                            <div class="cm-layer"><span>来源</span><span>${cm.source || 'N/A'}</span></div>
+                            ${cm.warning ? `<div class="cm-warning">${cm.warning}</div>` : ''}
                         </div>
                     `;
                 }
@@ -1145,15 +1147,18 @@
             .then(r => r.json())
             .then(data => {
                 if (data.success) {
-                    const engine = data.engine;
+                    const items = [];
+                    if (data.patchtst) items.push({name: 'PatchTST', value: data.patchtst.trained ? '已训练' : '未训练'});
+                    if (data.diffusion) items.push({name: 'Diffusion', value: data.diffusion.trained ? '已训练' : '未训练'});
+                    if (data.mamba) items.push({name: 'Mamba', value: data.mamba.trained ? '已训练' : '未训练'});
+                    if (data.self_supervised) items.push({name: 'Self-Supervised', value: data.self_supervised.trained ? '已训练' : '未训练'});
+                    if (data.multiagent) items.push({name: 'Multi-Agent', value: data.multiagent.num_agents + ' agents'});
+                    if (data.alpha158) items.push({name: 'Alpha158', value: data.alpha158.num_factors + ' factors'});
+                    if (data.drift_monitor) items.push({name: 'Drift Monitor', value: data.drift_monitor.drift_count + ' drifts'});
+                    if (data.sentiment_engine) items.push({name: 'Sentiment', value: data.sentiment_engine.method});
                     document.getElementById('sota-status').innerHTML = `
                         <div class="status-grid">
-                            <div class="status-item"><span>LLM 客户端</span><span class="status-ok">${engine.llm_client}</span></div>
-                            <div class="status-item"><span>Agent 协调器</span><span class="status-ok">${engine.agent_coordinator}</span></div>
-                            <div class="status-item"><span>因子挖掘</span><span class="status-ok">${engine.factor_mining}</span></div>
-                            <div class="status-item"><span>多模态引擎</span><span class="status-ok">${engine.multi_modal}</span></div>
-                            <div class="status-item"><span>RL 执行器</span><span class="status-ok">${engine.rl_executor}</span></div>
-                            <div class="status-item"><span>缓存大小</span><span>${data.cache_size}</span></div>
+                            ${items.map(item => `<div class="status-item"><span>${item.name}</span><span class="status-ok">${item.value}</span></div>`).join('')}
                         </div>
                     `;
                 }

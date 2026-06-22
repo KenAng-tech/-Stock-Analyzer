@@ -9,8 +9,9 @@ Performs deep analysis including:
 """
 
 import math
+import threading
 import numpy as np
-from typing import Dict, List
+from typing import Dict, List, Optional
 from datetime import datetime
 
 from modules.dynamic_cache import cache
@@ -21,10 +22,17 @@ from modules.ml_predictor import MLPredictor, ml_predictor
 
 class AnalysisEngine:
     """Core analysis engine for stock analysis"""
-    
+
     def __init__(self):
         from .fund_flow_optimizer import FundFlowOptimizer
         self.fund_flow_optimizer = FundFlowOptimizer()
+
+        # 概念漂移检测器 (P0: 集成到主流程)
+        from modules.concept_drift_detector import ConceptDriftDetector
+        self.drift_detector = ConceptDriftDetector()
+        self._last_prediction = None  # 用于漂移检测
+        self._last_actual = None
+
         self.industry_profiles = {
             '光通信': {
                 'avg_pe': 150,
@@ -408,6 +416,33 @@ class AnalysisEngine:
             except Exception:
                 pass
 
+        # ── 概念漂移检测 (P0: 集成到主流程) ─────────────────────
+        drift_status = {}
+        try:
+            # 记录预测值，用于下次与实际值比较
+            predicted_return = ml_up_prob - ml_down_prob  # 预测收益偏差
+            self._last_prediction = predicted_return
+
+            # 如果有上次预测但没有实际值，使用当前价格的日收益作为实际值
+            if self._last_actual is None and klines and len(klines) >= 2:
+                # 用昨天的实际收益作为实际值
+                prices = [float(k.get('close', 0)) for k in klines[-5:] if float(k.get('close', 0)) > 0]
+                if len(prices) >= 2:
+                    self._last_actual = (prices[-1] - prices[-2]) / prices[-2] if prices[-2] > 0 else 0
+
+            # 检测漂移（基于预测误差）
+            if self._last_prediction is not None and self._last_actual is not None:
+                drift_detected = self.drift_detector.check_prediction_drift(
+                    self._last_prediction, self._last_actual
+                )
+                drift_status = self.drift_detector.get_drift_status()
+                drift_status['drift_detected'] = drift_detected
+
+                if drift_detected:
+                    logger.warning("[AnalysisEngine] 概念漂移检测，ML 预测性能可能已退化")
+        except Exception as e:
+            logger.debug(f"[AnalysisEngine] 漂移检测异常: {e}")
+
         return {
             'model': {
                 'factors': factor_names,
@@ -425,6 +460,7 @@ class AnalysisEngine:
             'upside_space': round(upside_space, 1),
             'daily_volatility': round(daily_vol * 100, 2),
             'month_volatility': round(month_vol * 100, 2),
+            'drift_status': drift_status,  # P0: 概念漂移检测状态
         }
     
     def comprehensive_analysis(self, stock_data: Dict, industry: str = '光通信', cost_basis: float = 120) -> Dict:
@@ -489,18 +525,160 @@ class KlineSignalAnalysisMixin:
 
 class MultiFactorAnalysis:
     """多因子分析混入类"""
-    
+
     def __init__(self):
         from .multi_factor_model import MultiFactorModel
         self.multi_factor = MultiFactorModel()
-    
+
     def multi_factor_analysis(self, stock_data: Dict) -> Dict:
         """多因子分析"""
         scores = self.multi_factor.calculate_scores(stock_data)
         exposure = self.multi_factor.get_factor_exposure(stock_data)
-        
+
         return {
             'scores': scores,
             'exposure': exposure,
             'summary': f"综合评分 {scores['weighted_score']:.1f} ({scores['rating']})",
         }
+
+
+class FactorWeightScheduler:
+    """
+    动态因子权重调度器
+
+    功能:
+      - 跟踪因子历史值和收益率序列
+      - 定期基于滚动 IC/ICIR 更新因子权重
+      - 后台线程执行，不阻塞主线程
+
+    用法:
+      scheduler = FactorWeightScheduler(multi_factor_model_v2, interval_hours=24)
+      scheduler.start()
+      scheduler.record(stock_code, factor_values, return_value)  # 记录每日数据
+      scheduler.stop()
+    """
+
+    def __init__(self, factor_model, interval_hours: int = 24, window: int = 60):
+        """
+        Args:
+            factor_model: MultiFactorModelV2 实例
+            interval_hours: 权重更新间隔（小时）
+            window: 滚动 IC 窗口大小（天）
+        """
+        self.factor_model = factor_model
+        self.interval_hours = interval_hours
+        self.window = window
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+
+        # 因子历史数据: {factor_name: [values...], ...}
+        self._factor_history: Dict[str, List[float]] = {}
+        # 收益率序列: [returns...]
+        self._return_history: List[float] = []
+        # 股票列表（用于去重）
+        self._tracked_stocks: set = set()
+
+    def start(self):
+        """启动后台调度线程"""
+        if self._thread and self._thread.is_alive():
+            logger.warning("[FactorWeightScheduler] 调度器已在运行")
+            return
+
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._scheduler_loop,
+            name="factor-weight-scheduler",
+            daemon=True,
+        )
+        self._thread.start()
+        logger.info(f"[FactorWeightScheduler] 调度器已启动，更新间隔: {self.interval_hours}h, window: {self.window}天")
+
+    def stop(self):
+        """停止后台调度"""
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+            self._thread = None
+        logger.info("[FactorWeightScheduler] 调度器已停止")
+
+    def record(self, stock_code: str, factor_values: Dict[str, float], return_value: float):
+        """
+        记录单只股票的因子值和收益率
+
+        Args:
+            stock_code: 股票代码
+            factor_values: {factor_name: value, ...}
+            return_value: 当日收益率（百分比或小数均可）
+        """
+        with self._lock:
+            self._tracked_stocks.add(stock_code)
+
+            # 初始化因子历史（如果需要）
+            for factor_name in factor_values.keys():
+                if factor_name not in self._factor_history:
+                    self._factor_history[factor_name] = []
+
+            # 追加因子值
+            for factor_name, value in factor_values.items():
+                if factor_name in self._factor_history:
+                    self._factor_history[factor_name].append(value)
+
+            # 追加收益率
+            self._return_history.append(return_value)
+
+            # 保持历史长度一致（按最新长度截断）
+            min_len = min(len(self._return_history), min(len(h) for h in self._factor_history.values()) if self._factor_history else 0)
+            if min_len > 0:
+                self._return_history = self._return_history[-min_len:]
+                for factor_name in self._factor_history:
+                    self._factor_history[factor_name] = self._factor_history[factor_name][-min_len:]
+
+    def force_update(self):
+        """强制触发一次权重更新"""
+        with self._lock:
+            if len(self._return_history) < self.window:
+                logger.warning(f"[FactorWeightScheduler] 数据不足 ({len(self._return_history)} < {self.window})，跳过更新")
+                return False
+
+            try:
+                self.factor_model.update_weights_rolling_ic(
+                    factor_history=dict(self._factor_history),
+                    returns=list(self._return_history),
+                    window=self.window,
+                    min_icir=0.03,  # 稍微降低阈值以保留更多因子
+                )
+                logger.info("[FactorWeightScheduler] 权重更新完成")
+                return True
+            except Exception as e:
+                logger.error(f"[FactorWeightScheduler] 权重更新失败: {e}")
+                return False
+
+    def get_status(self) -> Dict:
+        """获取调度器状态"""
+        with self._lock:
+            return {
+                'is_running': self._thread is not None and self._thread.is_alive(),
+                'tracked_stocks': len(self._tracked_stocks),
+                'history_length': len(self._return_history),
+                'factor_count': len(self._factor_history),
+                'current_weights': dict(self.factor_model.factor_weights) if hasattr(self.factor_model, 'factor_weights') else {},
+            }
+
+    def _scheduler_loop(self):
+        """后台调度循环"""
+        import time
+        interval_seconds = self.interval_hours * 3600
+        last_update = time.time()
+
+        while not self._stop_event.is_set():
+            try:
+                current_time = time.time()
+                if current_time - last_update >= interval_seconds:
+                    logger.info("[FactorWeightScheduler] 触发定期权重更新...")
+                    self.force_update()
+                    last_update = current_time
+            except Exception as e:
+                logger.error(f"[FactorWeightScheduler] 调度循环异常: {e}")
+
+            time.sleep(60)  # 每分钟检查一次
