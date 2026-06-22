@@ -293,10 +293,16 @@ class PatchTSTIntegrator:
                 direction_map = {0: 'down', 1: 'neutral', 2: 'up'}
                 directions = [direction_map[p.item()] for p in predictions]
                 confidences = probs.max(dim=-1)[0].cpu().numpy().tolist()
+                prob_dict = {
+                    'up': probs[:, 2].cpu().numpy().tolist(),
+                    'neutral': probs[:, 1].cpu().numpy().tolist(),
+                    'down': probs[:, 0].cpu().numpy().tolist(),
+                }
                 return {
                     'directions': directions,
                     'confidences': confidences,
                     'all_predictions': directions,
+                    'probabilities': prob_dict,
                 }
 
     def _default_prediction(self) -> Dict:

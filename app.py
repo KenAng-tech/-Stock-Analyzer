@@ -1709,17 +1709,33 @@ def api_dl_predict(stock_code):
         # 使用 PatchTST 替代旧的 dl_model_v2
         result = patchtst_integrator.predict(sequences[:1])
 
+        # 兼容单样本 (direction/confidence) 和多样本 (directions/confidences) 返回格式
+        if 'directions' in result:
+            # 多样本路径 (batch >= 1)
+            direction = result['directions'][0]
+            confidence = result['confidences'][0]
+            probabilities = {
+                'up': result['probabilities']['up'][0] if isinstance(result['probabilities']['up'], (list, np.ndarray)) else result['probabilities']['up'],
+                'neutral': result['probabilities']['neutral'][0] if isinstance(result['probabilities']['neutral'], (list, np.ndarray)) else result['probabilities']['neutral'],
+                'down': result['probabilities']['down'][0] if isinstance(result['probabilities']['down'], (list, np.ndarray)) else result['probabilities']['down'],
+            }
+        else:
+            # 单样本路径 (shape (seq_len, n_features))
+            direction = result['direction']
+            confidence = result['confidence']
+            probabilities = {
+                'up': result['probabilities']['up'],
+                'neutral': result['probabilities']['neutral'],
+                'down': result['probabilities']['down'],
+            }
+
         return jsonify({
             'success': True,
             'stock_code': stock_code,
             'prediction': {
-                'direction': result['directions'][0],
-                'confidence': result['confidences'][0],
-                'probabilities': {
-                    'up': result['probabilities']['up'][0],
-                    'neutral': result['probabilities']['neutral'][0],
-                    'down': result['probabilities']['down'][0],
-                }
+                'direction': direction,
+                'confidence': confidence,
+                'probabilities': probabilities,
             },
             'model': 'PatchTST',
             'timestamp': datetime.now().isoformat(),
