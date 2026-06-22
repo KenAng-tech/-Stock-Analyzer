@@ -334,7 +334,7 @@ class PPOAgentV2:
             (action, log_prob, value)
         """
         action_logits = self._policy_forward(state)
-        action_probs = self._softmax(action_logits)
+        action_probs = self._softmax(action_logits).squeeze(0)
 
         if explore:
             # 采样
@@ -344,7 +344,7 @@ class PPOAgentV2:
             action = int(np.argmax(action_probs))
 
         log_prob = np.log(action_probs[action] + 1e-10)
-        value = self._value_forward(state)
+        value = float(self._value_forward(state).squeeze())
 
         return action, log_prob, value
 
@@ -526,10 +526,20 @@ class PPOAgentV2:
         h2 = self._relu(self._relu(obs @ self.policy_w1 + self.policy_b1) @ self.policy_w2 + self.policy_b2)
         grad_policy_logits = h2.T @ grad_logits / batch_size
 
-        # 价值梯度
+        # 价值梯度 (正确反向传播)
         value_pred = self._value_forward(obs)
-        value_error = value_pred - returns
-        grad_value_out = value_error.reshape(-1, 1) / batch_size
+        # value_pred 是 flatten 后的 (B,), 需要恢复 (B, 1) 做 backprop
+        value_pred_2d = value_pred.reshape(-1, 1)
+
+        # 对 value_out 的梯度: d_loss/d_value_out = (value_pred - returns) * h
+        value_error = (value_pred_2d - returns.reshape(-1, 1)) / batch_size  # (B, 1)
+
+        # 重新计算前向中间值
+        h1 = self._relu(obs @ self.value_w1 + self.value_b1)  # (B, hidden)
+        h2 = self._relu(h1 @ self.value_w2 + self.value_b2)  # (B, hidden)
+
+        # value_out 梯度: (hidden, 1)
+        grad_value_out = h2.T @ value_error
 
         return {'logits': grad_policy_logits}, {'out': grad_value_out}
 
@@ -727,7 +737,7 @@ class SACAgentV2:
         Returns:
             (action, log_prob)
         """
-        action_probs = self._actor_forward_probs(state)
+        action_probs = self._actor_forward_probs(state).squeeze(0)
 
         if evaluate:
             action = int(np.argmax(action_probs))
@@ -1164,13 +1174,16 @@ class RLTraderV2:
         ppo_path = os.path.join(self.model_dir, 'ppo_agent.pkl')
         sac_path = os.path.join(self.model_dir, 'sac_agent.pkl')
 
+        loaded = False
         if os.path.exists(ppo_path):
             self.ppo_agent = PPOAgentV2.load(ppo_path)
+            loaded = True
         if os.path.exists(sac_path):
             self.sac_agent = SACAgentV2.load(sac_path)
+            loaded = True
 
-        self._trained = True
-        return True
+        self._trained = loaded
+        return loaded
 
 
 # 全局实例

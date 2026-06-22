@@ -111,6 +111,14 @@ patchtst_integrator = get_patchtst()  # PatchTST 集成器
 drift_monitor = get_drift_monitor()   # 概念漂移检测器
 sentiment_engine = get_sentiment_engine()  # FinBERT 情感分析引擎
 
+# RL Trader — 初始化并尝试加载已有模型
+from modules.rl_trader_v2 import rl_trader_v2, TradingEnvV2, PPOAgentV2, SACAgentV2
+try:
+    rl_trader_v2.load()
+    logger.info("[RL Trader] 已加载已有模型")
+except Exception as e:
+    logger.warning(f"[RL Trader] 加载模型失败 (将使用随机策略): {e}")
+
 # P1 SOTA 优化模块初始化
 try:
     diffusion_predictor = get_diffusion_predictor()  # Diffusion 概率预测
@@ -1750,19 +1758,120 @@ def api_dl_predict(stock_code):
 def api_rl_trader_status():
     """强化学习交易器状态"""
     try:
-        from modules.rl_trader_v2 import rl_trader_v2
         return jsonify({
             'success': True,
             'status': {
                 'trained': rl_trader_v2._trained,
                 'market_regime': rl_trader_v2._market_regime,
-                'ppo_available': True,
-                'sac_available': True,
+                'ppo_available': rl_trader_v2.ppo_agent is not None,
+                'sac_available': rl_trader_v2.sac_agent is not None,
             },
             'timestamp': datetime.now().isoformat(),
         })
     except Exception as e:
         logger.error(f"[RL Trader Status] 错误：{e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/rl/train/<stock_code>', methods=['POST'])
+def api_rl_train(stock_code):
+    """训练 RL Trader 模型"""
+    try:
+        data = request.get_json() or {}
+        n_episodes = data.get('n_episodes', 30)
+        import numpy as np
+
+        # 获取 K 线数据
+        fetcher = StockDataFetcher()
+        klines = fetcher.get_kline_data(stock_code, period='daily', count=250)
+
+        if not klines or len(klines) < 60:
+            return jsonify({'success': False, 'error': 'K 线数据不足 (至少 60 条)'})
+
+        closes = np.array([k['close'] for k in klines], dtype=np.float64)
+        volumes = np.array([k['volume'] for k in klines], dtype=np.float64)
+
+        # 计算 12 维特征
+        def compute_features(i):
+            if i < 20:
+                return np.zeros(12)
+            window = closes[:i + 1]
+            vol_window = volumes[:i + 1]
+            mom_1d = (window[-1] / window[-2] - 1) * 100 if len(window) >= 2 else 0
+            mom_3d = (window[-1] / window[-4] - 1) * 100 if len(window) >= 4 else 0
+            mom_5d = (window[-1] / window[-6] - 1) * 100 if len(window) >= 6 else 0
+            mom_10d = (window[-1] / window[-11] - 1) * 100 if len(window) >= 11 else 0
+            avg_vol = np.mean(vol_window[-20:]) if len(vol_window) >= 20 else np.mean(vol_window)
+            vol_ratio = vol_window[-1] / avg_vol if avg_vol > 0 else 1.0
+            if len(window) >= 20:
+                rets = np.diff(np.log(window[-20:]))
+                vol = float(np.std(rets) * np.sqrt(252) * 100)
+            else:
+                vol = 5.0
+            if len(window) >= 15:
+                deltas = np.diff(window[-15:])
+                gains = np.mean(deltas[deltas > 0]) if np.any(deltas > 0) else 0
+                losses = abs(np.mean(deltas[deltas < 0])) if np.any(deltas < 0) else 0.001
+                rsi = float(100 - (100 / (1 + gains / losses)))
+            else:
+                rsi = 50.0
+            ema12 = window[0]
+            ema26 = window[0]
+            for p in window[1:]:
+                ema12 = (p - ema12) * (2 / 13) + ema12
+                ema26 = (p - ema26) * (2 / 27) + ema26
+            macd_hist = (ema12 - ema26) * 0.1
+            ma5 = np.mean(window[-5:]) if len(window) >= 5 else window[-1]
+            ma20 = np.mean(window[-20:]) if len(window) >= 20 else window[-1]
+            ma_ratio = float(ma5 / ma20) if ma20 > 0 else 1.0
+            year_high = np.max(window)
+            year_low = np.min(window)
+            price_pos = float((window[-1] - year_low) / (year_high - year_low + 1e-10))
+            return np.array([mom_1d, mom_3d, mom_5d, mom_10d, vol_ratio, vol, rsi, macd_hist, ma_ratio, price_pos, 0.5, 1.0])
+
+        # 构建特征矩阵 (与价格等长)
+        n_points = min(len(klines), 200)  # 限制训练数据量
+        features = np.array([compute_features(i) for i in range(n_points)])
+
+        # 确保价格和特征等长
+        closes = closes[:n_points]
+        volumes = volumes[:n_points]
+
+        # 创建交易环境
+        env = TradingEnvV2(
+            prices=closes,
+            features=features,
+            initial_capital=1000000,
+            transaction_cost=0.0035,
+        )
+
+        # 根据实际特征维度初始化 RL Trader
+        n_features = features.shape[1] if len(features.shape) > 1 else 1
+        state_dim = n_features + 5  # features + cash/position/pnl/drawdown/progress
+        rl_trader_v2.ppo_agent = PPOAgentV2(state_dim, action_dim=3)
+        rl_trader_v2.sac_agent = SACAgentV2(state_dim, action_dim=3)
+        rl_trader_v2._trained = False
+
+        # 训练 PPO Agent
+        logger.info(f"[RL Train] 开始训练 {stock_code}, {n_episodes} episodes")
+        training_result = rl_trader_v2.train_ppo(env, n_episodes=n_episodes)
+        rl_trader_v2.save()
+        logger.info(f"[RL Train] 训练完成: {training_result}")
+
+        return jsonify({
+            'success': True,
+            'training_result': {
+                'mean_reward': training_result['mean_reward'],
+                'std_reward': training_result['std_reward'],
+                'episodes': n_episodes,
+            },
+            'timestamp': datetime.now().isoformat(),
+        })
+
+    except Exception as e:
+        logger.error(f"[RL Train] 错误：{e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)})
 
 
