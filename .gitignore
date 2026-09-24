@@ -68,3 +68,13 @@ backtest_results/
 *.tmp
 temp/
 tmp/
+
+# 运行时产物/备份 (2026-09-24 收口: 防数据与密钥入 public 仓)
+runs/
+logs/
+models_data/
+backups/
+*.tar.gz
+.serena/
+.stock_analyzer.pid
+*.db

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "modules/schemas/common.schema.json",
+  "title": "Stock Analyzer 共享定义",
+  "$defs": {
+    "stock_code": {
+      "type": "string",
+      "pattern": "^(sh|sz|bj)(6\\d{5}|0\\d{5}|3\\d{5}|8\\d{5})$"
+    },
+    "thscode": {
+      "type": "string",
+      "pattern": "^\\d{6}\\.(SH|SZ|BJ)$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}"
+    },
+    "direction": {
+      "enum": ["up", "down", "neutral"]
+    },
+    "regime": {
+      "enum": ["bull", "bear", "sideways"]
+    },
+    "component_type": {
+      "enum": ["frontend", "backend", "database", "cloud", "security", "messagebus", "external"]
+    },
+    "sota_model_name": {
+      "enum": ["patchtst", "mamba", "diffusion", "drl", "conformal", "alpha158", "gnn", "multi_modal_fusion", "timesfm"]
+    }
+  }
+}

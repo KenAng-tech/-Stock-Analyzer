@@ -21,7 +21,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
 from modules.logger import logger
-from modules.llm_agents.llm_client import LLMClient, LLMResponse
+from modules.llm_agents.llm_client import LLMClient, LLMResponse, extract_json
 
 
 @dataclass
@@ -90,10 +90,9 @@ class FundAnalyst:
             response = self.llm.get_response([{"role": "user", "content": prompt}])
             
             # 解析 JSON 响应
-            try:
-                data = json.loads(response.content)
-            except:
-                data = {"direction": "neutral", "confidence": 0.5, "reasoning": response.content}
+            data = extract_json(response.content)
+            if not data:
+                data = {"direction": "neutral", "confidence": 0.5, "reasoning": response.content[:200]}
             
             return AnalystInsight(
                 analyst_type="fundamental",
@@ -155,10 +154,9 @@ class SentimentAnalyst:
             
             response = self.llm.get_response([{"role": "user", "content": prompt}])
             
-            try:
-                data = json.loads(response.content)
-            except:
-                data = {"direction": "neutral", "confidence": 0.5, "reasoning": response.content}
+            data = extract_json(response.content)
+            if not data:
+                data = {"direction": "neutral", "confidence": 0.5, "reasoning": response.content[:200]}
             
             return AnalystInsight(
                 analyst_type="sentiment",
@@ -229,10 +227,9 @@ class TechnicalAnalyst:
             
             response = self.llm.get_response([{"role": "user", "content": prompt}])
             
-            try:
-                data = json.loads(response.content)
-            except:
-                data = {"direction": "neutral", "confidence": 0.5, "reasoning": response.content}
+            data = extract_json(response.content)
+            if not data:
+                data = {"direction": "neutral", "confidence": 0.5, "reasoning": response.content[:200]}
             
             return AnalystInsight(
                 analyst_type="technical",
@@ -296,10 +293,9 @@ class NewsAnalyst:
             
             response = self.llm.get_response([{"role": "user", "content": prompt}])
             
-            try:
-                data = json.loads(response.content)
-            except:
-                data = {"direction": "neutral", "confidence": 0.5, "reasoning": response.content}
+            data = extract_json(response.content)
+            if not data:
+                data = {"direction": "neutral", "confidence": 0.5, "reasoning": response.content[:200]}
             
             return AnalystInsight(
                 analyst_type="news",
@@ -352,8 +348,9 @@ class AnalystTeam:
         except Exception as e:
             logger.error(f"[AnalystTeam] 并行执行异常: {e}")
 
-        # 过滤 None
-        result = [i for i in insights if i is not None]
+        # 过滤 None + 非 Insight 形状 (2026-09-10: 单分析师输出形状漂移
+        # (list/str) 曾致 get_summary 的 i.direction 循环炸 → 决策链降级噪声)
+        result = [i for i in insights if isinstance(i, AnalystInsight)]
         if not result:
             logger.error("[AnalystTeam] 所有分析师均失败，返回默认洞察")
             return [AnalystInsight("default", "neutral", 0.3, "All analysts failed")]

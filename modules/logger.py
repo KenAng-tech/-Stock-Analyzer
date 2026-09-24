@@ -12,11 +12,12 @@ from typing import Optional, Dict
 import json
 
 from config import config
+from modules.log_context import get_trace
 
 
 class StructuredFormatter(logging.Formatter):
     """结构化日志格式化器"""
-    
+
     def format(self, record):
         log_data = {
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -24,6 +25,11 @@ class StructuredFormatter(logging.Formatter):
             'module': record.name,
             'message': record.getMessage(),
         }
+        # 2026-09-20 整合②: 链式追踪 — 活跃 trace 注入每行 (PanWatch log_context 式),
+        # 一 grep trace 串全链 (生成→持久化→推送→送达); 无 trace 零污染
+        _tr = get_trace()
+        if _tr:
+            log_data['trace'] = _tr
         if hasattr(record, 'extra_data'):
             log_data['extra'] = record.extra_data
         if record.exc_info and record.exc_info[0]:
@@ -66,14 +72,10 @@ class Logger:
         # 清除已有handler
         self.logger.handlers.clear()
         
-        # 控制台handler
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(log_level)
-        console_format = logging.Formatter(
-            log_config.get('format', '%(asctime)s [%(levelname)s] %(name)s: %(message)s')
-        )
-        console_handler.setFormatter(console_format)
-        self.logger.addHandler(console_handler)
+        # 2026-09-14: 移除 StreamHandler(sys.stdout) 去重 —
+        # 原双写: 每条 log 同时写 stdout (launchd/重定向到 5002.log, 无 rotation,
+        # 实测 6.8KB/min 无限膨胀) 和 stock_analyzer.log (本文件 10MB×5 轮转链)。
+        # 去重后 stdout 仅剩 banner/print/traceback, 全量日志单一来源 = 轮转文件。
         
         # 文件handler
         file_handler = RotatingFileHandler(
@@ -101,16 +103,20 @@ class Logger:
             record.extra_data = extra
         logger.handle(record)
     
-    def info(self, message: str, extra: Optional[Dict] = None):
+    def info(self, message: str, extra: Optional[Dict] = None, **kwargs):
         self.log_extra(self.logger, logging.INFO, message, extra)
-    
-    def warning(self, message: str, extra: Optional[Dict] = None):
+
+    def warning(self, message: str, extra: Optional[Dict] = None, **kwargs):
         self.log_extra(self.logger, logging.WARNING, message, extra)
-    
-    def error(self, message: str, extra: Optional[Dict] = None):
+
+    def error(self, message: str, extra: Optional[Dict] = None, **kwargs):
+        # exc_info=True (标准 logging 习惯, errors.py 等 10 处使用) → 真因 traceback 并入消息, 不静默吞掉
+        if kwargs.get('exc_info'):
+            import traceback
+            message = f"{message} | {traceback.format_exc(limit=2).strip()}"
         self.log_extra(self.logger, logging.ERROR, message, extra)
-    
-    def debug(self, message: str, extra: Optional[Dict] = None):
+
+    def debug(self, message: str, extra: Optional[Dict] = None, **kwargs):
         self.log_extra(self.logger, logging.DEBUG, message, extra)
 
 

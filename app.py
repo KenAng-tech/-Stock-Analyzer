@@ -15,6 +15,8 @@ import sys
 import json
 import time
 import threading
+import numpy as np
+import pandas as pd
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file
 from flask_socketio import SocketIO
@@ -29,10 +31,10 @@ from modules.report_generator import ReportGenerator
 from modules.strategy_engine import StrategyEngine
 from modules.kline_signal_analyzer import KlineSignalAnalyzer
 from modules.atr_calculator import ATRCalculator, ADXCalculator
-from modules.websocket_handler import WebSocketFundFlowHandler
+
 from modules.heatmap_generator import HeatmapGenerator
-from modules.hmm_market_detector import MarketRegimeDetector
-from modules.factor_orthogonalizer import FactorOrthogonalizer
+from modules.hmm_market_detector import MarketRegimeDetector as HMMRegimeDetector
+from modules.factors.factor_orthogonalizer import FactorOrthogonalizer
 from modules.transaction_cost_model import TransactionCostModel
 from modules.alert_engine import AlertEngine
 from modules.dynamic_cache import cache
@@ -42,51 +44,191 @@ from config import config
 # Dashboard API Blueprint (P0-P3 量化模型仪表盘)
 from modules.dashboard_api import bp as dashboard_bp
 
+# Training API Blueprint (已在 modules/routes/__init__.py 中统一注册)
+
+# WebSocket 事件处理器
+from modules.routes.websocket_routes import init_socketio
+
 # ML Predictor (for dashboard API)
 from modules.ml_predictor import ml_predictor, model_training_scheduler
+from modules.sota_training_scheduler import sota_scheduler
 
 # P0 SOTA 优化: PatchTST + 概念漂移检测 + FinBERT
-from modules.patchtst_integrator import get_patchtst, PatchTSTIntegrator
+from modules.models.patchtst_integrator import get_patchtst, PatchTSTIntegrator
 from modules.drift_monitor import get_drift_monitor, DriftMonitor
 from modules.sentiment_engine import get_sentiment_engine, SentimentEngine
 
+# P2 SOTA: TimesNet (ICML 2023) — 2026-09-20 断链修复: 原 import 写 modules.timesnet_predictor
+# (顶层路径不存在) → 恒 None, sota_predict/sota_status 两活端点被饿 + health 永久 degraded
+# (自检失明, 真故障会被假 degraded 掩盖)。真身 = modules.models.timesnet_predictor
+# (09-17 迁移时 import 未跟进); sota 端点 hasattr+None 双守卫保留, 未训练态诚实空态。
+timesnet_trainer = None
+try:
+    from modules.models.timesnet_predictor import TimesNetTrainer
+    timesnet_trainer = TimesNetTrainer()
+    logger.info("[App] TimesNet 加载成功 (models/ 真身)")
+except Exception as e:
+    logger.warning(f"[App] TimesNet 加载失败 (非断链): {e}")
+    timesnet_trainer = None
+
+# P2: Conformal Prediction (不确定性量化)
+conformal_predictor = None
+try:
+    from modules.models.conformal_predictor import get_conformal_predictor
+    conformal_predictor = get_conformal_predictor()
+    logger.info("[App] ConformalPredictor 加载成功")
+except Exception as e:
+    logger.warning(f"[App] ConformalPredictor 加载失败: {e}")
+    conformal_predictor = None
+
+# Memory manager (lazy init)
+memory_manager = None
+try:
+    from modules.memory_manager import get_memory_monitor
+    memory_manager = get_memory_monitor()
+    logger.debug(f"DIAGNOSTIC: memory_manager = {memory_manager}")
+except Exception as e:
+    logger.warning(f"[App] Memory manager 加载失败: {e}")
+
 # P1 SOTA 优化: Diffusion + Mamba + Multi-Agent RL
 try:
-    from modules.diffusion_model import get_diffusion_predictor, DiffusionPredictor
+    from modules.models.diffusion_model import get_diffusion_predictor, DiffusionPredictor
 except Exception as e:
     logger.warning(f"[App] Diffusion 模块加载失败: {e}")
-    DiffusionPredictor = object
+    DiffusionPredictor = None
 
 try:
     from modules.multi_agent_trading import get_multi_agent_coordinator, MultiAgentCoordinator
 except Exception as e:
     logger.warning(f"[App] Multi-Agent 模块加载失败: {e}")
-    MultiAgentCoordinator = object
+    MultiAgentCoordinator = None
 
 try:
-    from modules.hft_mamba import get_mamba_hft_predictor, MambaHFTPredictor
+    from modules.models.hft_mamba import get_mamba_hft_predictor, MambaHFTPredictor
 except Exception as e:
     logger.warning(f"[App] Mamba 模块加载失败: {e}")
-    MambaHFTPredictor = object
+    MambaHFTPredictor = None
 
 # P2 SOTA 优化: 自监督预训练 + Qlib Alpha158
 try:
-    from modules.self_supervised import get_self_supervised_pretrainer, SelfSupervisedPretrainer
+    from modules.models.self_supervised import get_self_supervised_pretrainer, SelfSupervisedPretrainer
 except Exception as e:
     logger.warning(f"[App] Self-Supervised 模块加载失败: {e}")
-    SelfSupervisedPretrainer = object
+    SelfSupervisedPretrainer = None
 
 try:
-    from modules.alpha158 import get_alpha158_calculator, Alpha158Calculator
+    from modules.factors.alpha158_calculator import get_alpha158_calculator, Alpha158Calculator
 except Exception as e:
     logger.warning(f"[App] Alpha158 模块加载失败: {e}")
-    Alpha158Calculator = object
+    Alpha158Calculator = None
+
+# SOTA 优化: 动态因子权重 + GNN + CVaR/EVT + 概念漂移检测器 + 因子 IC 监控 + 跨市场因子
+try:
+    from modules.factor_weight_scheduler import get_factor_weight_scheduler, reset_factor_weight_scheduler
+except Exception as e:
+    logger.warning(f"[App] 因子权重调度器加载失败: {e}")
+
+try:
+    from modules.models.gnn_predictor import get_gnn_predictor, GNNPredictor
+except Exception as e:
+    logger.warning(f"[App] GNN 模块加载失败: {e}")
+    GNNPredictor = None
+
+try:
+    from modules.cvar_evt_analyzer import get_cvar_analyzer
+except Exception as e:
+    logger.warning(f"[App] CVaR/EVT 模块加载失败: {e}")
+
+try:
+    from modules.concept_drift_detector import ConceptDriftDetector
+    advanced_drift_detector = ConceptDriftDetector()
+except Exception as e:
+    logger.warning(f"[App] 高级概念漂移检测器加载失败: {e}")
+    advanced_drift_detector = None
+
+try:
+    from modules.factors.factor_ic_monitor import FactorICMonitor, FactorSelection, ICDecay
+except Exception as e:
+    logger.warning(f"[App] 因子 IC 监控加载失败: {e}")
+
+try:
+    from modules.dynamic_ensemble import DynamicEnsemblePredictor, ModelWeightScheduler, MarketRegimeDetector
+except Exception as e:
+    logger.warning(f"[App] Dynamic Ensemble 模块加载失败: {e}")
+    DynamicEnsemblePredictor = None
+
+try:
+    from modules.cross_market_factors import get_cross_market_factors, CrossMarketFactors
+except Exception as e:
+    logger.warning(f"[App] 跨市场因子加载失败: {e}")
+
+# P2/P3: LLM Sentiment + TimesFM + Factor Weight Scheduler
+try:
+    from modules.llm_sentiment import get_llm_sentiment, LLMSentimentAnalyzer
+except Exception as e:
+    logger.warning(f"[App] LLM Sentiment 模块加载失败: {e}")
+    LLMSentimentAnalyzer = None
+
+try:
+    from modules.timesfm_predictor import get_timesfm, TimesFMPredictor
+except Exception as e:
+    logger.warning(f"[App] TimesFM 模块加载失败: {e}")
+    TimesFMPredictor = None
+
+# P2/P3 SOTA 优化: PatchMamba + Conformal Prediction + Causal Discovery + Hierarchical RL + Adversarial Training + Foundation Model
+try:
+    from modules.patchmamba import get_patchmamba, PatchMamba
+except Exception as e:
+    logger.warning(f"[App] PatchMamba 加载失败: {e}")
+
+try:
+    from modules.causal_discovery import get_causal_discovery_engine, CausalDiscoveryEngine
+except Exception as e:
+    logger.warning(f"[App] Causal Discovery 加载失败: {e}")
+
+try:
+    from modules.drift_aware_pipeline import get_drift_aware_pipeline, reset_drift_aware_pipeline
+except Exception as e:
+    logger.warning(f"[App] Drift-Aware Pipeline 加载失败: {e}")
+
+try:
+    from modules.hierarchical_rl import get_hierarchical_rl_agent, HierarchicalRLAgent
+except Exception as e:
+    logger.warning(f"[App] Hierarchical RL 加载失败: {e}")
+
+try:
+    from modules.adversarial_training import get_adversarial_trainer, AdversarialTrainer, AdversarialConfig
+except Exception as e:
+    logger.warning(f"[App] Adversarial Training 加载失败: {e}")
+
+try:
+    from modules.foundation_model import get_foundation_model, FoundationModel
+except Exception as e:
+    logger.warning(f"[App] Foundation Model 加载失败: {e}")
 
 # Initialize Flask app
-app = Flask(__name__, 
+app = Flask(__name__,
             template_folder='templates',
             static_folder='static')
-CORS(app)
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+
+# CORS: 从配置读取允许的源，默认仅允许本地
+_ALLOWED_ORIGINS = config.get('server.allowed_origins', ['http://127.0.0.1:5002', 'http://localhost:5002'])
+CORS(app, origins=_ALLOWED_ORIGINS)
+
+# API Key 认证 (可选): 通过 X-API-Key 请求头
+_API_KEY = os.environ.get('STOCK_ANALYZER_API_KEY', config.get('server.api_key', ''))
+
+
+def _require_api_key():
+    """验证 API Key，未配置时跳过"""
+    if not _API_KEY:
+        return True
+    provided = request.headers.get('X-API-Key', '')
+    if provided == _API_KEY:
+        return True
+    logger.warning(f"[Auth] 无效 API Key: {provided[:8]}...")
+    return False
 
 # Initialize modules
 data_fetcher = StockDataFetcher()
@@ -95,13 +237,31 @@ report_generator = ReportGenerator()
 strategy_engine = StrategyEngine()
 kline_analyzer = KlineSignalAnalyzer()
 atr_calculator = ATRCalculator()
-socketio = SocketIO(app, cors_allowed_origins="*")
-websocket_handler = WebSocketFundFlowHandler(socketio)
+# ── SocketIO 唯一实例 (threading 模式) ─────────────────────────
+# 所有 WebSocket 事件处理器通过 init_socketio() 注册到此实例
+# run_server.py 通过 from app import socketio 导入，不再创建新实例
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=_ALLOWED_ORIGINS,
+    async_mode='threading',
+    ping_timeout=60,
+    ping_interval=25,
+)
+init_socketio(socketio)
+
+# 注册核心依赖到单例模块 (消除循环导入)
+from modules.dependencies import set_socketio, set_websocket_handler
+set_socketio(socketio)
+try:
+    from modules.websocket_handler import get_websocket_handler
+    set_websocket_handler(get_websocket_handler())
+except Exception:
+    pass
 heatmap_generator = HeatmapGenerator()
 alert_engine = AlertEngine()
 
 # New optimization modules
-hmm_detector = MarketRegimeDetector(n_states=3)
+hmm_detector = HMMRegimeDetector(n_states=3)
 factor_orthogonalizer = FactorOrthogonalizer()
 transaction_cost_model = TransactionCostModel()
 adx_calculator = ADXCalculator()
@@ -109,10 +269,19 @@ adx_calculator = ADXCalculator()
 # P0 SOTA 优化模块初始化
 patchtst_integrator = get_patchtst()  # PatchTST 集成器
 drift_monitor = get_drift_monitor()   # 概念漂移检测器
+# 2026-09-08: 漂移→紧急重训链接通 — scheduler.should_retrain() 消费 drift_count
+# (23:00/手动触发时 drift_count>3 → 立即重训+reset)。此前 set_drift_monitor 零调用
+# 调用点 → scheduler 的漂移分支恒为死代码 (hasattr 恒 False)。feed 侧见
+# analysis_engine._pending_drift_pair (跨时配对喂同一单例)
+try:
+    model_training_scheduler.set_drift_monitor(drift_monitor)
+except Exception as _e:
+    logger.error(f"漂移→重训链绑定失败: {_e}")
 sentiment_engine = get_sentiment_engine()  # FinBERT 情感分析引擎
 
 # RL Trader — 初始化并尝试加载已有模型
 from modules.rl_trader_v2 import rl_trader_v2, TradingEnvV2, PPOAgentV2, SACAgentV2
+from modules.portfolio_optimizer import PortfolioOptimizer
 try:
     rl_trader_v2.load()
     logger.info("[RL Trader] 已加载已有模型")
@@ -151,6 +320,253 @@ except Exception as e:
     logger.warning(f"[App] Alpha158 初始化失败: {e}")
     alpha158_calculator = None
 
+# SOTA 优化模块: 动态因子权重 + GNN + CVaR/EVT + 概念漂移 + 跨市场因子
+try:
+    factor_weight_scheduler = get_factor_weight_scheduler()  # 动态因子权重调度器
+    logger.info("[SOTA] 因子权重调度器已初始化")
+except Exception as e:
+    logger.warning(f"[App] 因子权重调度器初始化失败: {e}")
+    factor_weight_scheduler = None
+
+try:
+    gnn_predictor = get_gnn_predictor()  # GNN 图神经网络预测器
+    logger.info("[SOTA] GNN 预测器已初始化")
+except Exception as e:
+    logger.warning(f"[App] GNN 初始化失败: {e}")
+    gnn_predictor = None
+
+try:
+    cvar_analyzer = get_cvar_analyzer()  # CVaR/EVT 风险分析器
+    logger.info("[SOTA] CVaR/EVT 分析器已初始化")
+except Exception as e:
+    logger.warning(f"[App] CVaR/EVT 初始化失败: {e}")
+    cvar_analyzer = None
+
+try:
+    factor_ic_monitor = FactorICMonitor()  # 因子 IC 监控
+    logger.info("[SOTA] 因子 IC 监控已初始化")
+except Exception as e:
+    logger.warning(f"[App] 因子 IC 监控初始化失败: {e}")
+    factor_ic_monitor = None
+
+try:
+    dynamic_ensemble = DynamicEnsemblePredictor()  # 动态集成预测器
+    logger.info("[SOTA] 动态集成预测器已初始化")
+except Exception as e:
+    logger.warning(f"[App] 动态集成预测器初始化失败: {e}")
+    dynamic_ensemble = None
+
+try:
+    cross_market_factors = CrossMarketFactors()  # 跨市场因子
+    logger.info("[SOTA] 跨市场因子已初始化")
+except Exception as e:
+    logger.warning(f"[App] 跨市场因子初始化失败: {e}")
+    cross_market_factors = None
+
+# LLM Sentiment + TimesFM
+try:
+    llm_sentiment_analyzer = get_llm_sentiment()
+except Exception as e:
+    logger.warning(f"[App] LLM Sentiment 初始化失败: {e}")
+    llm_sentiment_analyzer = None
+
+try:
+    timesfm_predictor = get_timesfm()
+except Exception as e:
+    logger.warning(f"[App] TimesFM 初始化失败: {e}")
+    timesfm_predictor = None
+
+# P2/P3 SOTA 优化模块初始化
+try:
+    patchmamba_model = get_patchmamba()  # PatchMamba 混合架构
+    logger.info("[SOTA] PatchMamba 已初始化")
+except Exception as e:
+    logger.warning(f"[App] PatchMamba 初始化失败: {e}")
+    patchmamba_model = None
+
+try:
+    causal_discovery_engine = get_causal_discovery_engine()  # 因果发现引擎
+    logger.info("[SOTA] Causal Discovery Engine 已初始化")
+except Exception as e:
+    logger.warning(f"[App] Causal Discovery Engine 初始化失败: {e}")
+    causal_discovery_engine = None
+
+try:
+    drift_aware_pipeline = get_drift_aware_pipeline()  # 概念漂移自动重训练 pipeline
+    logger.info("[SOTA] Drift-Aware Pipeline 已初始化")
+except Exception as e:
+    logger.warning(f"[App] Drift-Aware Pipeline 初始化失败: {e}")
+    drift_aware_pipeline = None
+
+try:
+    hierarchical_rl = get_hierarchical_rl_agent()  # Hierarchical RL 分层强化学习
+    logger.info("[SOTA] Hierarchical RL Agent 已初始化")
+except Exception as e:
+    logger.warning(f"[App] Hierarchical RL 初始化失败: {e}")
+    hierarchical_rl = None
+
+try:
+    adversarial_trainer = get_adversarial_trainer()  # Adversarial Training 对抗训练
+    logger.info("[SOTA] Adversarial Training 已初始化")
+except Exception as e:
+    logger.warning(f"[App] Adversarial Training 初始化失败: {e}")
+    adversarial_trainer = None
+
+try:
+    foundation_model = get_foundation_model(n_features=12)  # Foundation Model 统一架构 (n_features=12 与 ml_predictor 一致)
+    logger.info("[SOTA] Foundation Model 已初始化 (n_features=12)")
+except Exception as e:
+    logger.warning(f"[App] Foundation Model 初始化失败: {e}")
+    foundation_model = None
+
+# P0-P3 新增模块初始化 (2026-08-07 深度优化)
+# Causal Factor Selector
+try:
+    from modules.causal_factor_selector import CausalFactorSelector
+    causal_factor_selector = CausalFactorSelector()
+    logger.info("[SOTA] 因果因子选择器已初始化")
+except Exception as e:
+    logger.warning(f"[App] 因果因子选择器初始化失败: {e}")
+    causal_factor_selector = None
+
+# XAI Explainer
+try:
+    from modules.xai_explainer import XAIExplainer
+    xai_explainer = XAIExplainer()
+    logger.info("[SOTA] XAI 可解释性引擎已初始化")
+except Exception as e:
+    logger.warning(f"[App] XAI 引擎初始化失败: {e}")
+    xai_explainer = None
+
+# Time Series Ensemble (基础模型投票)
+try:
+    from modules.time_series_ensemble import TimeSeriesEnsemble
+    ts_ensemble = TimeSeriesEnsemble()
+    logger.info("[SOTA] 时序基础模型投票集成已初始化")
+except Exception as e:
+    logger.warning(f"[App] 时序集成初始化失败: {e}")
+    ts_ensemble = None
+
+# Chronos Predictor
+try:
+    from modules.models.chronos_predictor import ChronosPredictor
+    chronos_predictor = ChronosPredictor()
+    logger.info("[SOTA] Chronos 零样本预测器已初始化")
+except Exception as e:
+    logger.warning(f"[App] Chronos 预测器初始化失败: {e}")
+    chronos_predictor = None
+
+# Dynamic Graph GNN
+try:
+    from modules.dynamic_gnn import DynamicGraphBuilder, CrossMarketGNN
+    dynamic_gnn_builder = DynamicGraphBuilder()
+    dynamic_gnn = None  # 需要邻接矩阵才初始化
+    logger.info("[SOTA] 动态图 GNN 构建器已初始化")
+except Exception as e:
+    logger.warning(f"[App] 动态图 GNN 初始化失败: {e}")
+    dynamic_gnn_builder = None
+    dynamic_gnn = None
+
+# Drift-Aware Ensemble (P0)
+try:
+    from modules.drift_aware_ensemble import DriftAwareEnsemble
+    drift_aware_ensemble = DriftAwareEnsemble()
+    logger.info("[SOTA] 漂移感知集成已初始化")
+except Exception as e:
+    logger.warning(f"[App] 漂移感知集成初始化失败: {e}")
+    drift_aware_ensemble = None
+
+# Phase 2: 多智能体共识决策
+try:
+    # 先导入 unified_decision_engine
+    from modules.unified_decision_engine import UnifiedDecisionEngine
+    unified_decision_engine = UnifiedDecisionEngine()
+    from modules import multi_agent_consensus as _consensus_mod
+    _consensus_mod._consensus_engine = _consensus_mod.MultiAgentConsensus()
+    _consensus_mod._consensus_engine.set_dependencies(unified_decision_engine, analysis_engine)
+    logger.info("[Phase2] 多智能体共识引擎已初始化")
+except Exception as e:
+    logger.warning(f"[Phase2] 多智能体共识引擎初始化失败: {e}")
+    _consensus_mod._consensus_engine = None
+
+# Phase 2: SOTA 五阶段决策引擎 (2026-09-08 断链修复)
+# /api/sota/decision 端点 hasattr(app_module, 'sota_engine') 恒 False —
+# SOTAIntegrationEngine 全项目从未实例化 → 端点从未调用过真实决策流水线,
+# 恒返回硬编码假 fallback (neutral/0.5)。实例化后: LLM 辩论(25s)→Factor→
+# MultiModal→RL→Ensemble 真链 (8080 不可用时各阶段降级规则引擎, 非假数据)
+try:
+    from modules.sota_integration import SOTAIntegrationEngine
+    sota_engine = SOTAIntegrationEngine()
+    logger.info("[SOTA] SOTAIntegrationEngine 已初始化 (LLM 辩论/Factor/MultiModal/RL)")
+except Exception as e:
+    logger.warning(f"[SOTA] SOTAIntegrationEngine 初始化失败: {e}")
+    sota_engine = None
+
+# Phase 2: 自动重训练触发器
+try:
+    from modules.auto_retrain_trigger import AutoRetrainTrigger, get_auto_retrain_trigger
+    auto_retrain_trigger = AutoRetrainTrigger()
+    logger.info("[Phase2] 自动重训练触发器已初始化")
+except Exception as e:
+    logger.warning(f"[Phase2] 自动重训练触发器初始化失败: {e}")
+    auto_retrain_trigger = None
+
+# Phase 2: LLM 因子提取器
+try:
+    from modules.llm_factor_extractor import LLMFactorExtractor, get_llm_factor_extractor
+    llm_factor_extractor = LLMFactorExtractor()
+    logger.info("[Phase2] LLM 因子提取器已初始化")
+except Exception as e:
+    logger.warning(f"[Phase2] LLM 因子提取器初始化失败: {e}")
+    llm_factor_extractor = None
+
+# Phase 3: Safe RL 安全约束层
+try:
+    from modules import safe_rl_constraint as _safe_rl_mod
+    _safe_rl_mod._safe_rl = _safe_rl_mod.SafeRLConstraintLayer()
+    logger.info("[Phase3] Safe RL 安全约束层已初始化")
+except Exception as e:
+    logger.warning(f"[Phase3] Safe RL 安全约束层初始化失败: {e}")
+    _safe_rl_mod._safe_rl = None
+
+# Phase 3: 贝叶斯不确定性量化
+try:
+    from modules import bayesian_uncertainty as _bayesian_mod
+    _bayesian_mod._bayesian = _bayesian_mod.BayesianUncertainty()
+    logger.info("[Phase3] 贝叶斯不确定性量化已初始化")
+except Exception as e:
+    logger.warning(f"[Phase3] 贝叶斯不确定性量化初始化失败: {e}")
+    _bayesian_mod._bayesian = None
+
+# Phase 3: 在线学习 + EWC 防遗忘
+try:
+    from modules import online_learning_ewc as _ewc_mod
+    _ewc_mod._online_ewc = _ewc_mod.OnlineLearningEWC()
+    logger.info("[Phase3] 在线学习 EWC 防遗忘已初始化")
+except Exception as e:
+    logger.warning(f"[Phase3] 在线学习 EWC 防遗忘初始化失败: {e}")
+    _ewc_mod._online_ewc = None
+
+# Phase 4: MLOps 自动化流水线
+try:
+    from modules.mlops_pipeline import MLopsPipeline, get_mlops_pipeline
+    mlops_pipeline = MLopsPipeline()
+    logger.info("[Phase4] MLOps 自动化流水线已初始化")
+except Exception as e:
+    logger.warning(f"[Phase4] MLOps 流水线初始化失败: {e}")
+    mlops_pipeline = None
+
+# Phase 4: 实时图神经网络
+# 2026-09-03 修: 路径错误 modules.realtime_gnn → modules.models.realtime_gnn
+# (文件实际在 modules/models/ 下, 旧路径恒 ImportError → realtime_gnn 静默 None)
+try:
+    from modules.models.realtime_gnn import RealTimeGNN, get_realtime_gnn
+    realtime_gnn = RealTimeGNN()
+    logger.info("[Phase4] 实时图神经网络已初始化")
+except Exception as e:
+    logger.warning(f"[Phase4] 实时 GNN 初始化失败: {e}")
+    realtime_gnn = None
+
 # 初始化日志
 logger.info("=" * 60)
 logger.info("[App] SOTA 优化模块已加载:")
@@ -162,6 +578,80 @@ logger.info("=" * 60)
 # Register Dashboard API Blueprint
 app.register_blueprint(dashboard_bp)
 
+# Training API Blueprint 由 modules/routes/__init__.py 的 register_blueprints() 统一注册
+from modules.routes import register_blueprints
+register_blueprints(app)
+
+# ── API Key 认证钩子 ──────────────────────────────────────
+# 公开路由 (不需要认证)
+_PUBLIC_ROUTES = {
+    '/', '/webgui.html', '/dl_dashboard.html', '/sota_dashboard.html',
+    '/api/health', '/api/stock/<stock_code>', '/api/stock/enhanced/<stock_code>',
+    '/api/ths/realtime/', '/api/ths/klines/', '/api/ths/valuation/',
+    '/api/ths/resolve', '/api/ths/status', '/api/ths/sync',
+    '/api/ths/dragon-tiger', '/api/ths/limit-up-pool', '/api/ths/hot-stocks',
+    '/static/<path:filename>',
+}
+
+
+def _is_public_route(rule):
+    """检查路由是否公开"""
+    if not rule:
+        return False
+    for public in _PUBLIC_ROUTES:
+        if rule == public:
+            return True
+        # 通配符匹配: /api/stock/<stock_code>
+        if '<' not in public and rule.startswith(public.rstrip('/<*>')):
+            return True
+    return False
+
+
+@app.before_request
+def _auth():
+    """API Key 认证 (仅在配置了 API Key 时生效)"""
+    if not _API_KEY:
+        return None  # 未配置 API Key，跳过认证
+    # 跳过静态文件和公开路由
+    if request.path.startswith('/static/'):
+        return None
+    # 修复: 检查 request.path 而非 request.endpoint
+    if _is_public_route(request.path):
+        return None
+    # 需要认证
+    if not _require_api_key():
+        return jsonify({'error': '未授权，请提供有效的 X-API-Key'}), 401
+
+
+# ── 链式追踪 (2026-09-20 整合②, PanWatch 链尾可观测式) ────────────
+# 每个 /api/* 请求 = 一个 trace: 取数→缓存→LLM→审计 全链日志同 trace,
+# grep 一即串全链; 响应头 X-Trace-Id 让调用方/curl 直接对账日志。
+
+@app.before_request
+def _trace_bind():
+    """请求级 trace 绑定 (非链式请求零注入 = 零污染)。"""
+    from modules.log_context import clear_trace, gen_trace_id, set_trace
+    if request.path.startswith('/api/'):
+        clear_trace()
+        target = '_'.join(request.path.strip('/').split('/')[1:3])
+        set_trace(gen_trace_id('req', target))
+
+
+@app.after_request
+def _trace_header(response):
+    """响应回显 X-Trace-Id = 链尾可观测 (响应 ↔ 日志一一对账)。"""
+    from modules.log_context import get_trace
+    tid = get_trace()
+    if tid:
+        response.headers['X-Trace-Id'] = tid
+    return response
+
+
+# ── 优雅关闭 ──────────────────────────────────────
+import atexit
+atexit.register(lambda: data_fetcher.close())
+
+
 # Default stock configuration
 DEFAULT_STOCK = {
     'code': 'sz300620',
@@ -170,2035 +660,9 @@ DEFAULT_STOCK = {
     'cost_basis': 120
 }
 
-# Data cache
-data_cache = {}
-CACHE_TTL = 60
-
-
-def get_stock_data(stock_code: str = None) -> dict:
-    """Get stock data with dynamic caching"""
-    code = stock_code or DEFAULT_STOCK['code']
-    cache_key = f"stock_{code}"
-    
-    # Try dynamic cache first
-    cached = cache.get(cache_key, category='realtime')
-    if cached:
-        return cached
-    
-    stock_data = data_fetcher.get_stock_info(code)
-    if stock_data:
-        cache.set(cache_key, stock_data, category='realtime')
-    
-    return stock_data
-
-
-@app.route('/')
-def index():
-    """Main dashboard page"""
-    return render_template('index.html')
-
-@app.route("/webgui.html")
-def webgui():
-    """Quant webgui page"""
-    return send_file("webgui.html")
-
-
-@app.route('/api/stock/<stock_code>')
-def api_get_stock(stock_code):
-    """Get stock data API"""
-    stock_data = get_stock_data(stock_code)
-    if stock_data:
-        return jsonify({
-            'success': True,
-            'data': stock_data,
-            'timestamp': datetime.now().isoformat()
-        })
-    return jsonify({'success': False, 'error': 'Failed to fetch stock data'}), 500
-
-
-@app.route('/api/stock/enhanced/<stock_code>')
-def api_get_enhanced_stock(stock_code):
-    """Get enhanced stock data with K-line stats"""
-    stock_data = data_fetcher.get_enhanced_stock_info(stock_code)
-    if stock_data:
-        return jsonify({
-            'success': True,
-            'data': stock_data,
-            'timestamp': datetime.now().isoformat()
-        })
-    return jsonify({'success': False, 'error': 'Failed to fetch stock data'}), 500
-
-
-@app.route('/api/analyze/<stock_code>')
-def api_analyze_stock(stock_code):
-    """Get comprehensive analysis"""
-    stock_data = get_stock_data(stock_code)
-    if not stock_data:
-        return jsonify({'success': False, 'error': 'Failed to fetch stock data'}), 500
-    
-    industry = DEFAULT_STOCK.get('industry', '光通信')
-    cost_basis = request.args.get('cost_basis', DEFAULT_STOCK['cost_basis'], type=float)
-    
-    # Perform analysis (with caching)
-    analysis = analysis_engine.comprehensive_analysis_cached(
-        stock_code, stock_data, industry, cost_basis
-    )
-    
-    # Generate strategies
-    strategies = strategy_engine.generate_strategy_recommendation(
-        stock_data, analysis, cost_basis
-    )
-    
-    # K-line signal analysis (P0: 传入K线数据以计算真实RSI)
-    kline_data_dict = {}
-    try:
-        kline_data_dict['daily'] = data_fetcher.get_kline_data(stock_code, 'daily', 100)
-        kline_data_dict['weekly'] = data_fetcher.get_kline_data(stock_code, 'weekly', 50)
-        kline_data_dict['monthly'] = data_fetcher.get_kline_data(stock_code, 'monthly', 20)
-    except Exception:
-        pass
-    kline_signals = kline_analyzer.generate_kline_signals(stock_data, kline_data_dict)
-    
-    # Generate report
-    report = report_generator.generate_report(analysis)
-    
-    # Save report to file
-    report_filename = f"report_{stock_code}_{int(time.time())}.md"
-    report_path = os.path.join('data', report_filename)
-    os.makedirs('data', exist_ok=True)
-    with open(report_path, 'w', encoding='utf-8') as f:
-        f.write(report)
-    
-    # Enhanced optimizations (P0: 传入K线数据)
-    hmm_regime = 'sideways'
-    hmm_probabilities = {}
-    hmm_adjustment = {}
-    try:
-        daily_klines = data_fetcher.get_kline_data(stock_code, 'daily', 100)
-        hmm_regime = hmm_detector.predict_regime(stock_data, daily_klines)
-        hmm_probabilities = hmm_detector.get_regime_probability(stock_data, daily_klines)
-        hmm_adjustment = hmm_detector.get_regime_adjustment(stock_data, daily_klines)
-    except:
-        pass
-    
-    # ADX Indicator
-    adx_data = {}
-    try:
-        adx_data = adx_calculator.calculate_adx_from_data(stock_data)
-    except:
-        pass
-    
-    # Kelly Position Sizing
-    kelly_info = analysis_engine._calculate_dynamic_kelly(stock_data)
-    
-    # CVaR Risk
-    cvar_risk = strategy_engine.calculate_cvar_risk([-0.05, -0.03, -0.02, 0.01, 0.02, 0.03, 0.04, 0.05])
-
-    # ATR Dynamic Stop Loss / Take Profit
-    try:
-        atr_stop = atr_calculator.calculate_atr_stop_loss(stock_data)
-        atr_profit = atr_calculator.calculate_atr_stop_gain(stock_data)
-        atr_sr = atr_calculator.calculate_dynamic_support_resistance(stock_data)
-    except Exception as e:
-        logger.error(f"ATR calculation error: {e}")
-        atr_stop = atr_profit = atr_sr = {}
-
-    return jsonify({
-        'success': True,
-        'analysis': analysis,
-        'strategies': strategies,
-        'kline_signals': kline_signals,
-        'hmm': {
-            'regime': hmm_regime,
-            'probabilities': hmm_probabilities,
-            'adjustment': hmm_adjustment
-        },
-        'adx': adx_data,
-        'kelly': kelly_info,
-        'cvar': cvar_risk,
-        'atr': {
-            'stop_loss': atr_stop,
-            'take_profit': atr_profit,
-            'support_resistance': atr_sr
-        },
-        'report': report,
-        'report_filename': report_filename,
-        'timestamp': datetime.now().isoformat()
-    })
-
-
 # ============================================================================
-# Cache Management API
+# 注意: 所有 API 路由已迁移至 modules/routes/ 下的 Blueprint 文件
+# 包括: data_routes, backtest_routes, factor_routes, sota_*, quant_routes,
+#       health_routes, cache_routes, alert_routes, config_routes,
+#       extra_routes, static_routes, monitor_routes, regime_routes 等 44 个文件
 # ============================================================================
-
-@app.route('/api/cache/stats')
-def api_cache_stats():
-    """Get cache statistics with hit/miss rates"""
-    return jsonify({
-        'success': True,
-        'stats': cache.get_stats(),
-        'timestamp': datetime.now().isoformat()
-    })
-
-
-@app.route('/api/cache/clear', methods=['POST'])
-def api_cache_clear():
-    """Clear cache by category, prefix, or stock code"""
-    body = request.json if request.is_json else {}
-    category = body.get('category')
-    stock_code = body.get('stock_code')
-    prefix = body.get('prefix')
-
-    if stock_code:
-        cache.invalidate_stock(stock_code)
-        msg = f'All cache for {stock_code} invalidated'
-    elif prefix:
-        cache.invalidate_key_prefix(prefix)
-        msg = f'Cache with prefix "{prefix}" cleared'
-    elif category:
-        cache.invalidate_category(category)
-        msg = f'Category "{category}" cache cleared'
-    else:
-        cache.cleanup()
-        msg = 'Expired cache entries cleaned'
-    return jsonify({'success': True, 'message': msg})
-
-
-@app.route('/api/cache/invalidate/<stock_code>', methods=['POST'])
-def api_invalidate_stock(stock_code):
-    """Invalidate all cache for a specific stock"""
-    cache.invalidate_stock(stock_code)
-    return jsonify({
-        'success': True,
-        'message': f'All cache invalidated for {stock_code}',
-        'timestamp': datetime.now().isoformat()
-    })
-
-
-@app.route('/api/cache/reset-stats', methods=['POST'])
-def api_reset_cache_stats():
-    """Reset cache hit/miss statistics"""
-    cache.reset_stats()
-    return jsonify({
-        'success': True,
-        'message': 'Cache statistics reset',
-        'timestamp': datetime.now().isoformat()
-    })
-
-
-# ============================================================================
-# P0 SOTA 优化 API: PatchTST + 概念漂移检测 + FinBERT
-# ============================================================================
-
-@app.route('/api/sota/patchtst/predict', methods=['GET'])
-def api_patchtst_predict():
-    """
-    PatchTST 预测 API
-
-    参数:
-        code: 股票代码 (默认 sz300620)
-        klines: 使用实时K线数据自动构建特征
-
-    返回:
-        {
-            'success': True,
-            'direction': 'up' | 'neutral' | 'down',
-            'confidence': 0.0-1.0,
-            'probabilities': {'up': float, 'neutral': float, 'down': float},
-            'patchtst_trained': bool,
-            'timestamp': str,
-        }
-    """
-    try:
-        stock_code = request.args.get('code', 'sz300620')
-
-        # 获取K线数据
-        klines = data_fetcher.get_kline_data(stock_code, period='daily', count=60)
-        if not klines or len(klines) < 30:
-            return jsonify({'success': False, 'error': 'K线数据不足'}), 400
-
-        # 准备特征 (使用 ml_predictor 的特征工程)
-        features = ml_predictor.prepare_features({'code': stock_code}, klines)
-
-        if features is None:
-            return jsonify({'success': False, 'error': '特征提取失败'}), 400
-
-        # 构造成 (seq_len, n_features) 格式
-        if len(features.shape) == 1:
-            features = features.reshape(1, -1)
-
-        # PatchTST 预测
-        result = patchtst_integrator.predict(features)
-
-        return jsonify({
-            'success': True,
-            'stock_code': stock_code,
-            'direction': result.get('direction', 'neutral'),
-            'confidence': result.get('confidence', 0.33),
-            'probabilities': result.get('probabilities', {'up': 0.33, 'neutral': 0.34, 'down': 0.33}),
-            'patchtst_trained': patchtst_integrator.is_trained(),
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"[PatchTST] 预测失败: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/sota/drift/status', methods=['GET'])
-def api_drift_status():
-    """
-    概念漂移检测状态 API
-
-    返回:
-        {
-            'success': True,
-            'drift_detected': bool,
-            'drift_count': int,
-            'last_drift_time': str | None,
-            'adwin_window_size': int,
-            'adwin_n_splits': int,
-            'should_retrain': bool,
-            'timestamp': str,
-        }
-    """
-    try:
-        status = drift_monitor.get_status()
-        return jsonify({
-            'success': True,
-            **status,
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"[DriftMonitor] 状态获取失败: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/sota/drift/reset', methods=['POST'])
-def api_drift_reset():
-    """重置概念漂移检测器"""
-    try:
-        drift_monitor.reset()
-        return jsonify({
-            'success': True,
-            'message': 'Drift monitor reset',
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"[DriftMonitor] 重置失败: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/sota/sentiment/analyze', methods=['POST'])
-def api_sentiment_analyze():
-    """
-    FinBERT 情感分析 API
-
-    请求体:
-        {
-            "texts": ["利好消息", "业绩超预期"],
-            "weights": [1.0, 1.0]  // 可选
-        }
-
-    返回:
-        {
-            'success': True,
-            'aggregate_score': -1.0 ~ +1.0,
-            'aggregate_label': 'positive' | 'neutral' | 'negative',
-            'aggregate_confidence': 0.0-1.0,
-            'text_count': int,
-            'method': 'finbert' | 'dictionary',
-            'timestamp': str,
-        }
-    """
-    try:
-        body = request.get_json()
-        if not body or 'texts' not in body:
-            return jsonify({'success': False, 'error': 'Missing texts'}), 400
-
-        texts = body['texts']
-        weights = body.get('weights')
-
-        result = sentiment_engine.aggregate(texts, weights)
-
-        return jsonify({
-            'success': True,
-            **result,
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"[SentimentEngine] 分析失败: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/sota/status', methods=['GET'])
-def api_sota_status():
-    """
-    SOTA 优化模块总体状态
-
-    返回:
-        {
-            'success': True,
-            'patchtst': {'trained': bool, 'device': str},
-            'drift_monitor': {'drift_count': int, 'should_retrain': bool},
-            'sentiment_engine': {'method': str},
-            'diffusion': {'trained': bool},
-            'multiagent': {'num_agents': int, 'decision_count': int},
-            'mamba': {'trained': bool, 'device': str},
-            'timestamp': str,
-        }
-    """
-    try:
-        return jsonify({
-            'success': True,
-            'patchtst': {
-                'trained': patchtst_integrator.is_trained(),
-                'device': str(patchtst_integrator.device) if patchtst_integrator.device else 'N/A',
-                'training_history': patchtst_integrator.training_history,
-            },
-            'drift_monitor': drift_monitor.get_status(),
-            'sentiment_engine': {
-                'method': 'finbert' if (sentiment_engine._finbert and sentiment_engine._finbert._use_hf) else 'dictionary',
-                'finbert_loaded': sentiment_engine._finbert._initialized if sentiment_engine._finbert else False,
-            },
-            'diffusion': {
-                'trained': diffusion_predictor.is_trained(),
-                'device': str(diffusion_predictor.device) if diffusion_predictor.device else 'N/A',
-            },
-            'multiagent': multi_agent_coordinator.get_status(),
-            'mamba': {
-                'trained': mamba_hft.trained,
-                'device': str(mamba_hft.device) if mamba_hft.device else 'N/A',
-            },
-            'self_supervised': {
-                'trained': self_supervised_pretrainer.trained if self_supervised_pretrainer else False,
-                'device': str(self_supervised_pretrainer.device) if self_supervised_pretrainer and hasattr(self_supervised_pretrainer, 'device') else 'N/A',
-            },
-            'alpha158': {
-                'num_factors': len(alpha158_calculator.factors) if alpha158_calculator else 0,
-                'factor_names': list(alpha158_calculator.factors.keys()) if alpha158_calculator else [],
-            },
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"[SOTA] 状态获取失败: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-
-
-# ============================================================================
-# P1 SOTA 优化 API: Diffusion + Mamba + Multi-Agent RL
-# ============================================================================
-
-@app.route('/api/sota/diffusion/predict', methods=['GET'])
-def api_diffusion_predict():
-    """
-    Diffusion 概率预测 API (带不确定性量化)
-
-    参数:
-        code: 股票代码 (默认 sz300620)
-        n_samples: 采样数量 (默认 10)
-
-    返回:
-        {
-            'success': True,
-            'direction': 'up' | 'neutral' | 'down',
-            'confidence': 0.0-1.0,
-            'uncertainty': {'lower': float, 'upper': float, 'std': float},
-            'probabilities': {'up': float, 'neutral': float, 'down': float},
-            'diffusion_trained': bool,
-            'timestamp': str,
-        }
-    """
-    try:
-        stock_code = request.args.get('code', 'sz300620')
-        n_samples = request.args.get('n_samples', 10, type=int)
-
-        # 获取K线数据
-        klines = data_fetcher.get_kline_data(stock_code, period='daily', count=60)
-        if not klines or len(klines) < 30:
-            return jsonify({'success': False, 'error': 'K线数据不足'}), 400
-
-        # 准备特征
-        features = ml_predictor.prepare_features({'code': stock_code}, klines)
-        if features is None:
-            return jsonify({'success': False, 'error': '特征提取失败'}), 400
-
-        if len(features.shape) == 1:
-            features = features.reshape(1, -1)
-
-        # Diffusion 预测 (带不确定性)
-        result = diffusion_predictor.predict(features, n_samples=n_samples)
-
-        return jsonify({
-            'success': True,
-            'stock_code': stock_code,
-            'direction': result.get('direction', 'neutral'),
-            'confidence': result.get('confidence', 0.33),
-            'uncertainty': result.get('uncertainty', {}),
-            'probabilities': result.get('probabilities', {'up': 0.33, 'neutral': 0.34, 'down': 0.33}),
-            'diffusion_trained': diffusion_predictor.is_trained(),
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"[Diffusion] 预测失败: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/sota/multiagent/pipeline', methods=['POST'])
-def api_multiagent_pipeline():
-    """
-    Multi-Agent RL Pipeline API
-
-    请求体:
-        {
-            'stock_code': 'sz300620',
-            'context': {...}  // 可选上下文
-        }
-
-    返回:
-        {
-            'success': True,
-            'action': 'buy' | 'sell' | 'hold',
-            'position_size': float,
-            'all_decisions': [...],
-            'timestamp': str,
-        }
-    """
-    try:
-        body = request.get_json() or {}
-        stock_code = body.get('stock_code', 'sz300620')
-        context = body.get('context', {})
-
-        # 获取股票数据
-        stock_data = get_stock_data(stock_code)
-        if not stock_data:
-            return jsonify({'success': False, 'error': '股票数据获取失败'}), 400
-
-        # 添加上下文
-        context['stock_code'] = stock_code
-        context['stock_data'] = stock_data
-        context['klines'] = data_fetcher.get_kline_data(stock_code, period='daily', count=60)
-
-        # Multi-Agent Pipeline
-        # 确保 klines 是 dict 格式
-        if isinstance(context.get('klines'), list):
-            # 转换 klines list 为 dict
-            klines_list = context['klines']
-            klines_dict = {
-                'close': [k.get('close', k.get('收盘', 0)) for k in klines_list],
-                'open': [k.get('open', k.get('开盘', 0)) for k in klines_list],
-                'high': [k.get('high', k.get('最高', 0)) for k in klines_list],
-                'low': [k.get('low', k.get('最低', 0)) for k in klines_list],
-                'volume': [k.get('volume', k.get('成交量', 0)) for k in klines_list],
-            }
-            context['klines'] = klines_dict
-
-        result = multi_agent_coordinator.run_pipeline(context)
-
-        return jsonify({
-            'success': True,
-            'action': result.get('action', 'hold'),
-            'position_size': result.get('position_size', 0.0),
-            'confidence': result.get('confidence', 0.0),
-            'all_decisions': result.get('all_decisions', []),
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"[MultiAgent] Pipeline 执行失败: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/sota/multiagent/status', methods=['GET'])
-def api_multiagent_status():
-    """Multi-Agent RL 状态 API"""
-    try:
-        status = multi_agent_coordinator.get_status()
-        return jsonify({
-            'success': True,
-            **status,
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"[MultiAgent] 状态获取失败: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/sota/mamba/predict', methods=['GET'])
-def api_mamba_predict():
-    """
-    Mamba 高频交易预测 API (低延迟)
-
-    参数:
-        code: 股票代码 (默认 sz300620)
-
-    返回:
-        {
-            'success': True,
-            'direction': 'up' | 'neutral' | 'down',
-            'confidence': 0.0-1.0,
-            'probabilities': {'up': float, 'neutral': float, 'down': float},
-            'inference_time_ms': float,
-            'mamba_trained': bool,
-            'timestamp': str,
-        }
-    """
-    try:
-        stock_code = request.args.get('code', 'sz300620')
-
-        # 获取K线数据
-        klines = data_fetcher.get_kline_data(stock_code, period='daily', count=60)
-        if not klines or len(klines) < 30:
-            return jsonify({'success': False, 'error': 'K线数据不足'}), 400
-
-        # 准备特征
-        features = ml_predictor.prepare_features({'code': stock_code}, klines)
-        if features is None:
-            return jsonify({'success': False, 'error': '特征提取失败'}), 400
-
-        if len(features.shape) == 1:
-            features = features.reshape(1, -1)
-
-        # Mamba 预测 (低延迟)
-        result = mamba_hft.predict(features)
-
-        return jsonify({
-            'success': True,
-            'stock_code': stock_code,
-            'direction': result.get('direction', 'neutral'),
-            'confidence': result.get('confidence', 0.33),
-            'probabilities': result.get('probabilities', {'up': 0.33, 'neutral': 0.34, 'down': 0.33}),
-            'inference_time_ms': result.get('inference_time_ms', 0.0),
-            'mamba_trained': mamba_hft.trained,
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"[MambaHFT] 预测失败: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-# ============================================================================
-# Configuration API
-# ============================================================================
-
-@app.route('/api/config')
-def api_get_config():
-    """Get current configuration"""
-    return jsonify({
-        'success': True,
-        'config': config.get('strategy', {}),
-        'timestamp': datetime.now().isoformat()
-    })
-
-
-@app.route('/api/config/<key>', methods=['POST'])
-def api_update_config(key):
-    """Update configuration"""
-    if request.is_json:
-        config.set(key, request.json.get('value'))
-    return jsonify({'success': True, 'key': key})
-
-
-# ============================================================================
-# Quant API Endpoints
-# ============================================================================
-
-_quant_signals = []
-_quant_positions = []
-_quant_stocks = []
-_quant_performance = {}
-
-
-def _generate_quant_signals(stock_data: dict) -> list:
-    """Generate quant trading signals"""
-    price = stock_data.get('price', 0)
-    change_pct = stock_data.get('change_pct', 0)
-    turnover = stock_data.get('turnover', 0)
-    
-    signals = []
-    
-    if change_pct < -5:
-        signals.append({
-            'type': 'BUY',
-            'name': '超跌反弹',
-            'strength': '强',
-            'price': price,
-            'reason': f'跌幅{abs(change_pct):.1f}%，超卖区域',
-            'timestamp': datetime.now().isoformat()
-        })
-    
-    if turnover > 200:
-        signals.append({
-            'type': 'BUY',
-            'name': '放量突破',
-            'strength': '中',
-            'price': price,
-            'reason': f'换手率{turnover:.1f}%，资金活跃',
-            'timestamp': datetime.now().isoformat()
-        })
-    
-    if change_pct > 3:
-        signals.append({
-            'type': 'HOLD',
-            'name': '趋势持有',
-            'strength': '中',
-            'price': price,
-            'reason': f'涨幅{change_pct:.1f}%，趋势向上',
-            'timestamp': datetime.now().isoformat()
-        })
-    
-    return signals
-
-
-def _generate_quant_positions(stock_data: dict, kline_signals: dict) -> list:
-    """Generate quant positions"""
-    price = stock_data.get('price', 0)
-    return [{
-        'stock_code': DEFAULT_STOCK['code'],
-        'stock_name': DEFAULT_STOCK['name'],
-        'price': price,
-        'position_pct': strategy_engine.calculate_dynamic_kelly_position(stock_data)['position_pct'],
-        'kline_score': kline_signals.get('total_score', 0),
-        'trend': kline_signals.get('overall_trend', '震荡'),
-        'timestamp': datetime.now().isoformat()
-    }]
-
-
-def _generate_quant_performance() -> dict:
-    """Generate quant performance metrics"""
-    return {
-        'total_return': 15.5,
-        'sharpe_ratio': 1.2,
-        'max_drawdown': -8.3,
-        'win_rate': 58.5,
-        'profit_factor': 1.8,
-        'total_trades': 127,
-        'timestamp': datetime.now().isoformat()
-    }
-
-
-def _generate_quant_stocks() -> list:
-    """Generate monitored stocks"""
-    return [{
-        'code': DEFAULT_STOCK['code'],
-        'name': DEFAULT_STOCK['name'],
-        'price': data_cache.get(f"stock_{DEFAULT_STOCK['code']}", {}).get('data', {}).get('price', 0),
-        'volume': data_cache.get(f"stock_{DEFAULT_STOCK['code']}", {}).get('data', {}).get('volume', 0),
-        'sector': DEFAULT_STOCK.get('industry', ''),
-        'timestamp': datetime.now().isoformat()
-    }]
-
-
-@app.route('/api/quant/signals')
-def api_quant_signals():
-    """Get quant trading signals"""
-    stock_data = get_stock_data()
-    if stock_data:
-        signals = _generate_quant_signals(stock_data)
-        return jsonify(signals)
-    return jsonify([])
-
-
-@app.route('/api/quant/positions')
-def api_quant_positions():
-    """Get quant positions"""
-    stock_data = get_stock_data()
-    if stock_data:
-        kline_signals = kline_analyzer.generate_kline_signals(stock_data)
-        positions = _generate_quant_positions(stock_data, kline_signals)
-        return jsonify(positions)
-    return jsonify([])
-
-
-@app.route('/api/quant/performance')
-def api_quant_performance():
-    """Get quant performance metrics"""
-    return jsonify(_generate_quant_performance())
-
-
-@app.route('/api/quant/stocks')
-def api_quant_stocks():
-    """Get monitored stocks"""
-    return jsonify(_generate_quant_stocks())
-
-
-@app.route('/api/quant/refresh')
-def api_quant_refresh():
-    """Refresh all quant data"""
-    global _quant_signals, _quant_positions, _quant_stocks, _quant_performance
-    
-    stock_data = get_stock_data()
-    if stock_data:
-        kline_signals = kline_analyzer.generate_kline_signals(stock_data)
-        _quant_signals = _generate_quant_signals(stock_data)
-        _quant_positions = _generate_quant_positions(stock_data, kline_signals)
-        _quant_performance = _generate_quant_performance()
-        _quant_stocks = _generate_quant_stocks()
-    
-    return jsonify({
-        'success': True,
-        'timestamp': datetime.now().isoformat()
-    })
-
-
-# ============================================================================
-# Kline Scores API Endpoint (for webgui.html Analysis page)
-# ============================================================================
-
-@app.route('/api/quant/kline-scores')
-def api_quant_kline_scores():
-    """Get K-line scores: morphology, volume, position, RSI"""
-    stock_data = get_stock_data()
-    if not stock_data:
-        return jsonify({'success': False, 'error': 'Failed to fetch stock data'}), 500
-    
-    kline_signals = kline_analyzer.generate_kline_signals(stock_data)
-    technical = analysis_engine.technical_analysis(stock_data)
-    
-    response = {
-        'success': True,
-        'stock': {
-            'code': stock_data.get('code', ''),
-            'name': stock_data.get('name', ''),
-            'price': stock_data.get('price', 0),
-            'timestamp': stock_data.get('timestamp', '')
-        },
-        'scores': {
-            'morphology_score': kline_signals.get('candlestick_patterns', []),
-            'volume_score': kline_signals.get('volume_signals', []),
-            'position_score': kline_signals.get('price_position', ''),
-            'rsi_score': kline_signals.get('rsi', 0),
-            'total_score': kline_signals.get('total_score', 0),
-            'trend': kline_signals.get('overall_trend', ''),
-            'trend_strength': kline_signals.get('trend_strength', ''),
-            'bullish_signals': kline_signals.get('bullish_signals', []),
-            'bearish_signals': kline_signals.get('bearish_signals', []),
-            'multi_cycle': kline_signals.get('multi_cycle', {})
-        },
-        'technical': {
-            'rsi': technical.get('indicators', {}).get('rsi', 0),
-            'macd': technical.get('indicators', {}).get('macd', ''),
-            'kdj': technical.get('indicators', {}).get('kdj', ''),
-            'short_term_trend': technical.get('trend', {}).get('short_term', ''),
-            'medium_term_trend': technical.get('trend', {}).get('medium_term', '')
-        },
-        'timestamp': datetime.now().isoformat()
-    }
-    
-    return jsonify(response)
-
-
-# ============================================================================
-# ATR API Endpoint (for webgui.html)
-# ============================================================================
-
-@app.route('/api/atr/<stock_code>')
-def api_get_atr(stock_code):
-    """Get ATR-based analysis"""
-    stock_data = get_stock_data(stock_code)
-    if not stock_data:
-        return jsonify({'success': False, 'error': 'Failed to fetch stock data'}), 500
-    
-    atr_stop = atr_calculator.calculate_atr_stop_loss(stock_data)
-    atr_profit = atr_calculator.calculate_atr_stop_gain(stock_data)
-    atr_support_resistance = atr_calculator.calculate_dynamic_support_resistance(stock_data)
-    
-    return jsonify({
-        'success': True,
-        'atr_stop_loss': atr_stop,
-        'atr_take_profit': atr_profit,
-        'atr_support_resistance': atr_support_resistance,
-        'timestamp': datetime.now().isoformat()
-    })
-
-
-# ============================================================================
-# Health Check & Additional API Endpoints (for webgui.html)
-# ============================================================================
-
-@app.route('/api/health')
-def api_health():
-    """Health check endpoint for webgui.html"""
-    try:
-        stock_data = get_stock_data()
-        return jsonify({
-            'success': True,
-            'version': '2.0.0',
-            'timestamp': datetime.now().isoformat(),
-            'data_fresh': stock_data is not None,
-            'cache_stats': cache.get_stats()
-        })
-    except Exception as e:
-        logger.error(f"Health check error: {e}")
-        return jsonify({
-            'success': True,
-            'version': '2.0.0',
-            'timestamp': datetime.now().isoformat(),
-            'data_fresh': False,
-            'error': str(e)
-        })
-
-
-@app.route('/api/heatmap')
-def api_get_heatmap():
-    """Get industry heatmap data"""
-    try:
-        heatmap = heatmap_generator.generate_industry_heatmap()
-        return jsonify({
-            'success': True,
-            'data': heatmap,
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"Heatmap error: {e}")
-        return jsonify({
-            'success': True,
-            'data': [],
-            'timestamp': datetime.now().isoformat()
-        })
-
-
-@app.route('/api/alerts/<stock_code>')
-def api_get_alerts(stock_code):
-    """Get alerts for a stock"""
-    try:
-        alerts = alert_engine.get_recent_alerts(stock_code)
-        summary = alert_engine.get_alert_summary(stock_code)
-        return jsonify({
-            'success': True,
-            'alerts': alerts,
-            'summary': summary,
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"Alerts error: {e}")
-        return jsonify({
-            'success': True,
-            'alerts': [],
-            'summary': {},
-            'timestamp': datetime.now().isoformat()
-        })
-
-
-# ── 告警配置 API ──────────────────────────────────────────────
-
-@app.route('/api/alerts/config', methods=['GET'])
-def api_get_alert_config():
-    """获取告警阈值配置"""
-    try:
-        return jsonify({
-            'success': True,
-            'config': alert_engine.thresholds,
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"Alert config error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/alerts/config', methods=['POST'])
-def api_update_alert_config():
-    """更新告警阈值配置"""
-    try:
-        body = request.get_json()
-        if not body:
-            return jsonify({'success': False, 'error': 'No JSON body'}), 400
-
-        for key, value in body.items():
-            if key in alert_engine.thresholds:
-                alert_engine.thresholds[key] = value
-                logger.info(f"[AlertConfig] {key} = {value}")
-
-        return jsonify({
-            'success': True,
-            'config': alert_engine.thresholds,
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"Alert config update error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-# ============================================================================
-# P3: Walk-Forward Backtest Report API
-# ============================================================================
-
-@app.route('/api/backtest/report')
-def api_backtest_report():
-    """Walk-forward 回测报告 + Monte Carlo 模拟"""
-    stock_code = request.args.get('stock_code', 'sz300620')
-    try:
-        from modules.walkforward_backtester import WalkForwardBacktester
-        from modules.data_fetcher import StockDataFetcher
-        import numpy as np
-
-        data_fetcher = StockDataFetcher()
-        raw_klines = data_fetcher.get_kline_data(stock_code, period='daily', count=500)
-
-        if not raw_klines or len(raw_klines) < 100:
-            return jsonify({'success': False, 'error': 'K 线数据不足'})
-
-        # ── 从原始 K 线计算 RSI + MACD ───────────────────────────
-        closes = np.array([float(k['close']) for k in raw_klines])
-
-        def compute_rsi(prices, period=14):
-            if len(prices) < period + 1:
-                return 50.0
-            deltas = np.diff(prices)
-            gains = np.mean(deltas[-period:][deltas[-period:] > 0]) if np.any(deltas[-period:] > 0) else 0
-            losses = abs(np.mean(deltas[-period:][deltas[-period:] < 0])) if np.any(deltas[-period:] < 0) else 0.001
-            rs = gains / losses
-            return float(100 - (100 / (1 + rs)))
-
-        def compute_macd_histogram(prices, fast=12, slow=26, signal=9):
-            if len(prices) < slow + signal:
-                return 0.0
-            ema_fast = prices[0]
-            for p in prices[1:]:
-                ema_fast = (p - ema_fast) * (2 / (fast + 1)) + ema_fast
-            ema_slow = prices[0]
-            for p in prices[1:]:
-                ema_slow = (p - ema_slow) * (2 / (slow + 1)) + ema_slow
-            macd_line = ema_fast - ema_slow
-            # 简化 signal line
-            return float(macd_line * 0.1)
-
-        # 为每根 K 线增强指标
-        kline_data = []
-        for i, k in enumerate(raw_klines):
-            bar = dict(k)
-            bar['close'] = float(k['close'])
-            bar['rsi'] = compute_rsi(closes[:i+1]) if i >= 14 else 50.0
-            bar['macd_histogram'] = compute_macd_histogram(closes[:i+1]) if i >= 35 else 0.0
-            kline_data.append(bar)
-
-        # ── 增强策略: RSI + MACD + 均线 ──────────────────────────
-        def enhanced_strategy(bar, position, capital):
-            rsi = bar.get('rsi', 50)
-            macd_hist = bar.get('macd_histogram', 0)
-            close = bar.get('close', 0)
-
-            # 均线过滤: 只在价格 > MA20 时做多
-            if position == 0:
-                if rsi < 35 and macd_hist > 0 and close > 0:
-                    return 'buy'
-            elif position > 0:
-                if rsi > 65 and macd_hist < 0:
-                    return 'sell'
-            return 'hold'
-
-        backtester = WalkForwardBacktester(enhanced_strategy, initial_capital=1000000)
-
-        # Walk-forward
-        wf_result = backtester.run_walk_forward(
-            kline_data, train_period=120, test_period=42, n_windows=5
-        )
-
-        # Monte Carlo
-        daily_returns = [(closes[i] - closes[i-1]) / closes[i-1] for i in range(1, len(closes))]
-        mc_result = backtester.monte_carlo_simulation(daily_returns, n_simulations=1000)
-
-        # ── 生成中文总结 ──────────────────────────────────────────
-        summary = wf_result.get('summary', {})
-        windows = wf_result.get('windows', [])
-        mc = mc_result
-
-        # 根据结果生成中文解读
-        mean_ret = summary.get('mean_return', 0)
-        mean_sharpe = summary.get('mean_sharpe', 0)
-        mean_winrate = summary.get('mean_winrate', 0)
-        mean_maxdd = summary.get('mean_maxdd', 0)
-        n_windows = summary.get('n_windows', 0)
-        consistent = summary.get('consistent_profit', 0)
-
-        # 策略评价
-        if mean_ret > 0.05:
-            strategy_verdict = '策略表现良好，在多数窗口实现了正收益'
-        elif mean_ret > 0:
-            strategy_verdict = '策略略有盈利，但收益较低，建议优化入场/出场条件'
-        elif mean_ret > -0.05:
-            strategy_verdict = '策略小幅亏损，交易成本可能侵蚀了利润，建议放宽交易条件或缩短持仓周期'
-        else:
-            strategy_verdict = '策略表现不佳，建议重新设计信号逻辑'
-
-        # 风险评价
-        if mean_maxdd < 0.05:
-            risk_verdict = '回撤控制优秀，最大回撤低于 5%'
-        elif mean_maxdd < 0.15:
-            risk_verdict = '回撤在可接受范围内'
-        else:
-            risk_verdict = '回撤偏大，建议增加止损或降低仓位'
-
-        # Sharpe 评价
-        if mean_sharpe > 1.0:
-            sharpe_verdict = '风险调整后收益优秀'
-        elif mean_sharpe > 0.5:
-            sharpe_verdict = '风险调整后收益良好'
-        elif mean_sharpe > 0:
-            sharpe_verdict = '风险调整后收益一般'
-        else:
-            sharpe_verdict = '风险调整后收益较差'
-
-        # 胜率评价
-        if mean_winrate > 0.6:
-            winrate_verdict = '交易胜率较高'
-        elif mean_winrate > 0.4:
-            winrate_verdict = '胜率中等，盈亏比是关键'
-        else:
-            winrate_verdict = '胜率偏低，需关注单笔亏损控制'
-
-        # Monte Carlo 解读
-        mc_prob = mc.get('probability_profit', 0)
-        if mc_prob > 0.8:
-            mc_verdict = '长期盈利概率很高'
-        elif mc_prob > 0.6:
-            mc_verdict = '长期盈利概率较好'
-        elif mc_prob > 0.4:
-            mc_verdict = '长期盈利概率一般'
-        else:
-            mc_verdict = '长期盈利概率偏低'
-
-        chinese_summary = {
-            'title': '回测总结',
-            'strategy_verdict': strategy_verdict,
-            'risk_verdict': risk_verdict,
-            'sharpe_verdict': sharpe_verdict,
-            'winrate_verdict': winrate_verdict,
-            'mc_verdict': mc_verdict,
-            'details': {
-                'total_windows': n_windows,
-                'consistent_profit_windows': consistent,
-                'mean_return_pct': round(mean_ret * 100, 2),
-                'mean_sharpe': round(mean_sharpe, 3),
-                'mean_maxdd_pct': round(mean_maxdd * 100, 2),
-                'mean_winrate_pct': round(mean_winrate * 100, 0),
-                'mc_profit_prob_pct': round(mc_prob * 100, 0),
-                'mc_mean_final_wan': round(mc.get('mean_final', 0) / 10000, 1),
-                'mc_median_final_wan': round(mc.get('median_final', 0) / 10000, 1),
-            },
-        }
-
-        return jsonify({
-            'success': True,
-            'stock_code': stock_code,
-            'walk_forward': wf_result,
-            'monte_carlo': mc_result,
-            'chinese_summary': chinese_summary,
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"Backtest report error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify({'success': False, 'error': str(e)})
-
-
-# ============================================================================
-# P2: Portfolio Optimization API
-# ============================================================================
-
-@app.route('/api/portfolio/optimize')
-def api_portfolio_optimize():
-    """组合优化（Black-Litterman + 风险平价）"""
-    stock_code = request.args.get('stock_code', 'sz300620')
-    try:
-        from modules.portfolio_optimizer import PortfolioOptimizer
-        from modules.multi_factor_model import multi_factor_model
-
-        optimizer = PortfolioOptimizer()
-
-        # 假设股票池（实际应从数据库获取）
-        sd = get_stock_data(stock_code) or {}
-        stocks = [
-            {'name': '光库科技', 'code': 'sz300620', 'market_cap': 200,
-             'expected_return': 0.15, 'price': sd.get('price', 100), 'pe': sd.get('pe', 100)},
-            {'name': '仕佳光子', 'code': 'sh688313', 'market_cap': 150,
-             'expected_return': 0.12, 'price': 80, 'pe': 120},
-            {'name': '中际旭创', 'code': 'sz300308', 'market_cap': 500,
-             'expected_return': 0.18, 'price': 150, 'pe': 60},
-            {'name': '江特电机', 'code': 'sz002176', 'market_cap': 100,
-             'expected_return': 0.10, 'price': 30, 'pe': 80},
-            {'name': '东百集团', 'code': 'sh600693', 'market_cap': 50,
-             'expected_return': 0.08, 'price': 8, 'pe': 20},
-        ]
-
-        market_caps = [s['market_cap'] for s in stocks]
-
-        # 主观观点
-        views = [
-            {'asset': 0, 'return': 0.20, 'confidence': 0.6},
-            {'asset': 2, 'return': 0.25, 'confidence': 0.5},
-        ]
-
-        # Black-Litterman
-        bl_result = optimizer.black_litterman_summary(stocks, views)
-
-        # 风险平价（简化: 假设相关系数矩阵）
-        import numpy as np
-        n = len(stocks)
-        corr_matrix = [[1.0 if i == j else 0.3 for j in range(n)] for i in range(n)]
-        rp_weights = optimizer.calculate_risk_parity_weights(corr_matrix)
-
-        return jsonify({
-            'success': True,
-            'black_litterman': bl_result,
-            'risk_parity_weights': {stocks[i]['name']: rp_weights[i] for i in range(n)},
-            'correlation_matrix': corr_matrix,
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"Portfolio optimize error: {e}")
-        return jsonify({'success': False, 'error': str(e)})
-
-
-# ============================================================================
-# P3: Sentiment Analysis API
-# ============================================================================
-
-@app.route('/api/sentiment/<stock_code>')
-def api_sentiment(stock_code):
-    """情绪分析"""
-    try:
-        from modules.sentiment_analyzer import SentimentAnalyzer
-        analyzer = SentimentAnalyzer()
-
-        # 获取股票名称
-        stock_data = get_stock_data(stock_code)
-        stock_name = stock_data.get('name', '') if stock_data else ''
-
-        result = analyzer.get_sentiment_score(stock_code, stock_name)
-        return jsonify({
-            'success': True,
-            'stock_code': stock_code,
-            'sentiment': result,
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"Sentiment error: {e}")
-        return jsonify({'success': False, 'error': str(e)})
-
-
-# ============================================================================
-# P1: Factor Normalization Comparison API
-# ============================================================================
-
-@app.route('/api/factors/norm')
-def api_factors_norm():
-    """因子标准化对比（P2: 使用 V2 15因子模型 + 真实股票池）"""
-    stock_code = request.args.get('stock_code', 'sz300620')
-    try:
-        import numpy as np
-        from modules.multi_factor_model_v2 import multi_factor_model_v2
-        from modules.data_fetcher import StockDataFetcher
-
-        fetcher = StockDataFetcher()
-        stock_data = get_stock_data(stock_code) or {}
-        klines = fetcher.get_kline_data(stock_code, 'daily', 100) if stock_code else None
-
-        # 使用 V2 模型计算所有因子
-        all_factors = multi_factor_model_v2.calculate_all_factors(stock_data, klines)
-        weighted = multi_factor_model_v2.weighted_score(all_factors)
-        rating = multi_factor_model_v2.get_rating(weighted)
-
-        # 构建真实股票池（从 AKShare 获取同行业股票）
-        universe_codes = ['300620', '688313', '300308', '002176', '600693']
-        universe: list = []
-        universe_factors_map = {}
-        for code in universe_codes:
-            try:
-                full_code = f"sh{code}" if code.startswith('6') else f"sz{code}"
-                u_data = fetcher.get_stock_info(full_code)
-                u_klines = fetcher.get_kline_data(full_code, 'daily', 100)
-                if u_data:
-                    uf = multi_factor_model_v2.calculate_all_factors(u_data, u_klines)
-                    universe_factors_map[code] = uf
-                    stock_entry = dict(u_data)
-                    stock_entry.update(uf)
-                    stock_entry['market_cap'] = u_data.get('total_market_value', 0)
-                    universe.append(stock_entry)
-            except Exception:
-                pass
-
-        # 增强版横截面标准化: Winsorize → Rank → Industry Neutralize → Market Cap Neutralize → Orthogonalize
-        factor_scores = dict(all_factors)
-        factor_scores['market_cap_value'] = stock_data.get('total_market_value', 0)
-        normalized = multi_factor_model_v2.cross_sectional_normalize(factor_scores, universe)
-
-        # 标准化后的加权分数
-        norm_weighted = sum(
-            multi_factor_model_v2.factor_weights.get(f, 0.05) * normalized.get(f, 0)
-            for f in normalized
-        ) / sum(multi_factor_model_v2.factor_weights.get(f, 0.05) for f in normalized) if normalized else 0.0
-
-        # 最强/最弱因子
-        sorted_factors = sorted(all_factors.items(), key=lambda x: x[1], reverse=True)
-        top_factors = [{'name': k, 'score': round(v, 2)} for k, v in sorted_factors[:3]]
-        bottom_factors = [{'name': k, 'score': round(v, 2)} for k, v in sorted_factors[-3:]]
-
-        return jsonify({
-            'success': True,
-            'stock_code': stock_code,
-            'raw_scores': {k: round(v, 2) for k, v in all_factors.items()},
-            'all_factors': {k: round(v, 2) for k, v in all_factors.items()},
-            'normalized_scores': normalized,
-            'weighted_score_raw': round(weighted, 4),
-            'weighted_score_normalized': round(norm_weighted, 4),
-            'rating': rating,
-            'normalized': True,
-            'top_factors': top_factors,
-            'bottom_factors': bottom_factors,
-            'universe_size': len(universe),
-            'factor_count': len(all_factors),
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"Factor norm error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify({'success': False, 'error': str(e)})
-
-
-# ============================================================================
-# P3: Event-Driven Backtest API
-# ============================================================================
-
-@app.route('/api/backtest/event')
-def api_event_backtest():
-    """事件驱动回测 API"""
-    stock_code = request.args.get('stock_code', 'sz300620')
-    try:
-        from modules.data_fetcher import StockDataFetcher
-        from modules.event_backtester import EventDrivenBacktester
-        from modules.strategies.rsi_macd_strategy import RSIMACDStrategy
-        import numpy as np
-
-        fetcher = StockDataFetcher()
-        raw_klines = fetcher.get_kline_data(stock_code, 'daily', 300)
-
-        if not raw_klines or len(raw_klines) < 60:
-            return jsonify({'success': False, 'error': 'K线数据不足 (需要至少 60 根)'})
-
-        # 计算技术指标
-        closes = np.array([float(k['close']) for k in raw_klines])
-
-        def compute_rsi(prices, period=14):
-            if len(prices) < period + 1:
-                return 50.0
-            deltas = np.diff(prices)
-            gains = np.mean(deltas[-period:][deltas[-period:] > 0]) if np.any(deltas[-period:] > 0) else 0
-            losses = abs(np.mean(deltas[-period:][deltas[-period:] < 0])) if np.any(deltas[-period:] < 0) else 0.001
-            return float(100 - (100 / (1 + gains / losses)))
-
-        def compute_ema(data, period):
-            if len(data) < period:
-                return float(np.mean(data))
-            m = 2.0 / (period + 1)
-            r = float(data[0])
-            for p in data[1:]:
-                r = (p - r) * m + r
-            return r
-
-        # 为每根 K 线计算指标
-        kline_data = []
-        for i, k in enumerate(raw_klines):
-            bar = dict(k)
-            bar['close'] = float(k['close'])
-            bar['open'] = float(k.get('open', bar['close']))
-            bar['high'] = float(k.get('high', bar['close']))
-            bar['low'] = float(k.get('low', bar['close']))
-            bar['volume'] = float(k.get('volume', 0))
-            bar['stock_code'] = stock_code
-
-            if i >= 14:
-                bar['rsi'] = compute_rsi(closes[:i+1])
-            else:
-                bar['rsi'] = 50.0
-
-            if i >= 26:
-                e12 = compute_ema(closes[:i+1], 12)
-                e26 = compute_ema(closes[:i+1], 26)
-                bar['macd_histogram'] = (e12 - e26) * 0.1
-            else:
-                bar['macd_histogram'] = 0.0
-
-            if i >= 20:
-                bar['ma20'] = float(np.mean(closes[:i+1]))
-            else:
-                bar['ma20'] = bar['close']
-
-            if i >= 14:
-                bar['atr'] = float(np.std(closes[:i+1])) * bar['close'] * 0.03
-            else:
-                bar['atr'] = bar['close'] * 0.02
-
-            kline_data.append(bar)
-
-        # 运行回测
-        strategy = RSIMACDStrategy(
-            buy_rsi=35, sell_rsi=65,
-            stop_loss_pct=0.05, take_profit_pct=0.15,
-            position_pct=0.8,
-        )
-        backtester = EventDrivenBacktester(
-            strategy=strategy,
-            initial_capital=1000000,
-            commission_rate=0.0003,
-            stamp_tax=0.001,
-            slippage_bps=3,
-        )
-        result = backtester.run(kline_data)
-
-        return jsonify({
-            'success': True,
-            'stock_code': stock_code,
-            'metrics': result.get('metrics', {}),
-            'equity_curve': result.get('equity_curve', []),
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"Event backtest error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify({'success': False, 'error': str(e)})
-
-
-# ============================================================================
-# ML Model Training API
-# ============================================================================
-
-@app.route('/api/ml/train', methods=['POST'])
-def api_ml_train():
-    """手动触发 ML 模型训练"""
-    try:
-        stock_code = 'sz300620'
-        if request.is_json and request.json:
-            stock_code = request.json.get('stock_code', 'sz300620')
-
-        result = model_training_scheduler.force_train(stock_code)
-        return jsonify({
-            'success': result.get('success', False),
-            'message': result.get('message', result.get('error', '')),
-            'data': {k: v for k, v in result.items() if k not in ('message', 'error')},
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"ML train error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify({'success': False, 'error': str(e)})
-
-
-@app.route('/api/ml/train/status')
-def api_ml_train_status():
-    """获取 ML 模型训练状态"""
-    try:
-        status = model_training_scheduler.get_status()
-        return jsonify({
-            'success': True,
-            'data': status,
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"ML train status error: {e}")
-        return jsonify({'success': False, 'error': str(e)})
-
-
-@app.route('/api/ml/model/report')
-def api_ml_model_report():
-    """获取 ML 模型报告（含新鲜度检查）"""
-    try:
-        report = ml_predictor.get_model_report()
-        return jsonify({
-            'success': True,
-            'data': report,
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"ML model report error: {e}")
-        return jsonify({'success': False, 'error': str(e)})
-
-
-# ============================================================================
-# 启动时初始化
-# ============================================================================
-
-# 启动 ML 模型训练调度器
-try:
-    # 先尝试加载已有模型
-    ml_predictor.load_latest_model()
-    # 启动调度器（启动时检查是否需要训练）
-    model_training_scheduler.start(on_startup=not ml_predictor.is_trained)
-    # 绑定漂移检测器，实现漂移触发重训练
-    try:
-        model_training_scheduler.set_drift_monitor(drift_monitor)
-    except Exception:
-        pass
-except Exception as e:
-    logger.error(f"ML 调度器启动失败: {e}")
-
-# 启动因子权重动态调整调度器
-try:
-    from modules.multi_factor_model_v2 import multi_factor_model_v2
-    from modules.analysis_engine import FactorWeightScheduler
-    factor_weight_scheduler = FactorWeightScheduler(multi_factor_model_v2, interval_hours=24, window=60)
-    factor_weight_scheduler.start()
-except Exception as e:
-    logger.error(f"因子权重调度器启动失败: {e}")
-
-
-
-# ============================================================================
-# 深度学习 V2 API Endpoints (Transformer-LSTM + PPO/SAC + FinBERT)
-# ============================================================================
-
-@app.route('/api/dl/predict/<stock_code>')
-def api_dl_predict(stock_code):
-    """深度学习模型预测 (PatchTST — 替换原 Transformer-LSTM)"""
-    try:
-        from modules.data_fetcher import StockDataFetcher
-        import numpy as np
-
-        fetcher = StockDataFetcher()
-        klines = fetcher.get_kline_data(stock_code, 'daily', 100)
-
-        if not klines or len(klines) < 20:
-            return jsonify({'success': False, 'error': 'K 线数据不足'})
-
-        closes = np.array([k['close'] for k in klines], dtype=float)
-        volumes = np.array([k['volume'] for k in klines], dtype=float)
-
-        def compute_features(i):
-            if i < 20:
-                return np.zeros(12)
-            window = closes[:i+1]
-            vol_window = volumes[:i+1]
-            mom_1d = (window[-1] / window[-2] - 1) * 100 if len(window) >= 2 else 0
-            mom_3d = (window[-1] / window[-4] - 1) * 100 if len(window) >= 4 else 0
-            mom_5d = (window[-1] / window[-6] - 1) * 100 if len(window) >= 6 else 0
-            mom_10d = (window[-1] / window[-11] - 1) * 100 if len(window) >= 11 else 0
-            avg_vol = np.mean(vol_window[-20:]) if len(vol_window) >= 20 else np.mean(vol_window)
-            vol_ratio = vol_window[-1] / avg_vol if avg_vol > 0 else 1.0
-            if len(window) >= 20:
-                rets = np.diff(np.log(window[-20:]))
-                vol = float(np.std(rets) * np.sqrt(252) * 100)
-            else:
-                vol = 5.0
-            if len(window) >= 15:
-                deltas = np.diff(window[-15:])
-                gains = np.mean(deltas[deltas > 0]) if np.any(deltas > 0) else 0
-                losses = abs(np.mean(deltas[deltas < 0])) if np.any(deltas < 0) else 0.001
-                rsi = float(100 - (100 / (1 + gains / losses)))
-            else:
-                rsi = 50.0
-            ema12 = window[0]
-            ema26 = window[0]
-            for p in window[1:]:
-                ema12 = (p - ema12) * (2/13) + ema12
-                ema26 = (p - ema26) * (2/27) + ema26
-            macd_hist = (ema12 - ema26) * 0.1
-            ma5 = np.mean(window[-5:]) if len(window) >= 5 else window[-1]
-            ma20 = np.mean(window[-20:]) if len(window) >= 20 else window[-1]
-            ma_ratio = float(ma5 / ma20) if ma20 > 0 else 1.0
-            year_high = np.max(window)
-            year_low = np.min(window)
-            price_pos = float((window[-1] - year_low) / (year_high - year_low + 1e-10))
-            return np.array([mom_1d, mom_3d, mom_5d, mom_10d, vol_ratio, vol, rsi, macd_hist, ma_ratio, price_pos, 0.5, 1.0])
-
-        seq_len = 20
-        sequences = []
-        for i in range(seq_len - 1, min(len(klines), 50)):
-            seq = np.stack([compute_features(i - seq_len + 1 + j) for j in range(seq_len)])
-            sequences.append(seq)
-
-        if not sequences:
-            return jsonify({'success': False, 'error': '无法构建序列'})
-
-        sequences = np.stack(sequences)
-
-        # 使用 PatchTST 替代旧的 dl_model_v2
-        result = patchtst_integrator.predict(sequences[:1])
-
-        # 兼容单样本 (direction/confidence) 和多样本 (directions/confidences) 返回格式
-        if 'directions' in result:
-            # 多样本路径 (batch >= 1)
-            direction = result['directions'][0]
-            confidence = result['confidences'][0]
-            probabilities = {
-                'up': result['probabilities']['up'][0] if isinstance(result['probabilities']['up'], (list, np.ndarray)) else result['probabilities']['up'],
-                'neutral': result['probabilities']['neutral'][0] if isinstance(result['probabilities']['neutral'], (list, np.ndarray)) else result['probabilities']['neutral'],
-                'down': result['probabilities']['down'][0] if isinstance(result['probabilities']['down'], (list, np.ndarray)) else result['probabilities']['down'],
-            }
-        else:
-            # 单样本路径 (shape (seq_len, n_features))
-            direction = result['direction']
-            confidence = result['confidence']
-            probabilities = {
-                'up': result['probabilities']['up'],
-                'neutral': result['probabilities']['neutral'],
-                'down': result['probabilities']['down'],
-            }
-
-        return jsonify({
-            'success': True,
-            'stock_code': stock_code,
-            'prediction': {
-                'direction': direction,
-                'confidence': confidence,
-                'probabilities': probabilities,
-            },
-            'model': 'PatchTST',
-            'timestamp': datetime.now().isoformat(),
-        })
-
-    except Exception as e:
-        logger.error(f"[DL Predict] 错误：{e}")
-        return jsonify({'success': False, 'error': str(e)})
-
-
-@app.route('/api/rl/trader/status')
-def api_rl_trader_status():
-    """强化学习交易器状态"""
-    try:
-        return jsonify({
-            'success': True,
-            'status': {
-                'trained': rl_trader_v2._trained,
-                'market_regime': rl_trader_v2._market_regime,
-                'ppo_available': rl_trader_v2.ppo_agent is not None,
-                'sac_available': rl_trader_v2.sac_agent is not None,
-            },
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"[RL Trader Status] 错误：{e}")
-        return jsonify({'success': False, 'error': str(e)})
-
-
-@app.route('/api/rl/train/<stock_code>', methods=['POST'])
-def api_rl_train(stock_code):
-    """训练 RL Trader 模型"""
-    try:
-        data = request.get_json() or {}
-        n_episodes = data.get('n_episodes', 30)
-        import numpy as np
-
-        # 获取 K 线数据
-        fetcher = StockDataFetcher()
-        klines = fetcher.get_kline_data(stock_code, period='daily', count=250)
-
-        if not klines or len(klines) < 60:
-            return jsonify({'success': False, 'error': 'K 线数据不足 (至少 60 条)'})
-
-        closes = np.array([k['close'] for k in klines], dtype=np.float64)
-        volumes = np.array([k['volume'] for k in klines], dtype=np.float64)
-
-        # 计算 12 维特征
-        def compute_features(i):
-            if i < 20:
-                return np.zeros(12)
-            window = closes[:i + 1]
-            vol_window = volumes[:i + 1]
-            mom_1d = (window[-1] / window[-2] - 1) * 100 if len(window) >= 2 else 0
-            mom_3d = (window[-1] / window[-4] - 1) * 100 if len(window) >= 4 else 0
-            mom_5d = (window[-1] / window[-6] - 1) * 100 if len(window) >= 6 else 0
-            mom_10d = (window[-1] / window[-11] - 1) * 100 if len(window) >= 11 else 0
-            avg_vol = np.mean(vol_window[-20:]) if len(vol_window) >= 20 else np.mean(vol_window)
-            vol_ratio = vol_window[-1] / avg_vol if avg_vol > 0 else 1.0
-            if len(window) >= 20:
-                rets = np.diff(np.log(window[-20:]))
-                vol = float(np.std(rets) * np.sqrt(252) * 100)
-            else:
-                vol = 5.0
-            if len(window) >= 15:
-                deltas = np.diff(window[-15:])
-                gains = np.mean(deltas[deltas > 0]) if np.any(deltas > 0) else 0
-                losses = abs(np.mean(deltas[deltas < 0])) if np.any(deltas < 0) else 0.001
-                rsi = float(100 - (100 / (1 + gains / losses)))
-            else:
-                rsi = 50.0
-            ema12 = window[0]
-            ema26 = window[0]
-            for p in window[1:]:
-                ema12 = (p - ema12) * (2 / 13) + ema12
-                ema26 = (p - ema26) * (2 / 27) + ema26
-            macd_hist = (ema12 - ema26) * 0.1
-            ma5 = np.mean(window[-5:]) if len(window) >= 5 else window[-1]
-            ma20 = np.mean(window[-20:]) if len(window) >= 20 else window[-1]
-            ma_ratio = float(ma5 / ma20) if ma20 > 0 else 1.0
-            year_high = np.max(window)
-            year_low = np.min(window)
-            price_pos = float((window[-1] - year_low) / (year_high - year_low + 1e-10))
-            return np.array([mom_1d, mom_3d, mom_5d, mom_10d, vol_ratio, vol, rsi, macd_hist, ma_ratio, price_pos, 0.5, 1.0])
-
-        # 构建特征矩阵 (与价格等长)
-        n_points = min(len(klines), 200)  # 限制训练数据量
-        features = np.array([compute_features(i) for i in range(n_points)])
-
-        # 确保价格和特征等长
-        closes = closes[:n_points]
-        volumes = volumes[:n_points]
-
-        # 创建交易环境
-        env = TradingEnvV2(
-            prices=closes,
-            features=features,
-            initial_capital=1000000,
-            transaction_cost=0.0035,
-        )
-
-        # 根据实际特征维度初始化 RL Trader
-        n_features = features.shape[1] if len(features.shape) > 1 else 1
-        state_dim = n_features + 5  # features + cash/position/pnl/drawdown/progress
-        rl_trader_v2.ppo_agent = PPOAgentV2(state_dim, action_dim=3)
-        rl_trader_v2.sac_agent = SACAgentV2(state_dim, action_dim=3)
-        rl_trader_v2._trained = False
-
-        # 训练 PPO Agent
-        logger.info(f"[RL Train] 开始训练 {stock_code}, {n_episodes} episodes")
-        training_result = rl_trader_v2.train_ppo(env, n_episodes=n_episodes)
-        rl_trader_v2.save()
-        logger.info(f"[RL Train] 训练完成: {training_result}")
-
-        return jsonify({
-            'success': True,
-            'training_result': {
-                'mean_reward': training_result['mean_reward'],
-                'std_reward': training_result['std_reward'],
-                'episodes': n_episodes,
-            },
-            'timestamp': datetime.now().isoformat(),
-        })
-
-    except Exception as e:
-        logger.error(f"[RL Train] 错误：{e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)})
-
-
-@app.route('/api/sentiment/bert/<stock_code>')
-def api_sentiment_bert(stock_code):
-    """FinBERT 情感分析"""
-    try:
-        from modules.sentiment_bert import sentiment_ensemble, DictionaryAnalyzer
-        from modules.data_fetcher import StockDataFetcher
-
-        fetcher = StockDataFetcher()
-        stock_data = fetcher.get_stock_info(stock_code)
-        stock_name = stock_data.get('name', '') if stock_data else ''
-
-        # 简化：使用词典法分析股票名称和代码的情感
-        analyzer = DictionaryAnalyzer()
-        result = analyzer.analyze(stock_name + ' 股票 分析')
-
-        return jsonify({
-            'success': True,
-            'stock_code': stock_code,
-            'sentiment': result,
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"[FinBERT Sentiment] 错误：{e}")
-        return jsonify({'success': False, 'error': str(e)})
-
-
-@app.route('/api/dl/ensemble/report')
-def api_dl_ensemble_report():
-    """深度学习模型报告 (PatchTST — 替换原 Transformer-LSTM)"""
-    try:
-        return jsonify({
-            'success': True,
-            'report': {
-                'model': {
-                    'name': 'PatchTST',
-                    'architecture': 'Patch + Transformer Encoder + RoPE',
-                    'description': '时序预测 SOTA 架构 (2024)',
-                },
-                'params': {
-                    'd_model': patchtst_integrator.d_model,
-                    'n_heads': patchtst_integrator.n_heads,
-                    'n_layers': patchtst_integrator.n_layers,
-                    'patch_len': patchtst_integrator.patch_len,
-                    'seq_len': patchtst_integrator.seq_len,
-                    'n_features': patchtst_integrator.n_features,
-                    'n_classes': patchtst_integrator.n_classes,
-                    'dropout': patchtst_integrator.dropout,
-                },
-                'trained': patchtst_integrator.is_trained(),
-                'device': str(patchtst_integrator.device) if patchtst_integrator.device else 'N/A',
-            },
-            'timestamp': datetime.now().isoformat(),
-        })
-    except Exception as e:
-        logger.error(f"[DL Report] 错误：{e}")
-        return jsonify({'success': False, 'error': str(e)})
-
-
-# ============================================================================
-# Deep Learning Dashboard Route
-# ============================================================================
-
-@app.route('/dl_dashboard.html')
-def dl_dashboard():
-    """Deep Learning Dashboard page"""
-    return send_file("templates/dl_dashboard.html")
-
-
-# ============================================================================
-# SOTA Quantitative Model API Endpoints
-# ============================================================================
-
-# Initialize SOTA Engine (lazy-loaded on first request)
-_sota_engine = None
-_sota_engine_lock = threading.Lock()
-
-def _get_sota_engine():
-    """Get or create SOTA Engine singleton"""
-    global _sota_engine
-    if _sota_engine is None:
-        with _sota_engine_lock:
-            if _sota_engine is None:
-                try:
-                    from modules.sota_integration import SOTAIntegrationEngine
-                    _sota_engine = SOTAIntegrationEngine()
-                    logger.info("[SOTA] Engine initialized")
-                except ImportError as e:
-                    logger.error(f"[SOTA] Import error: {e}")
-                    _sota_engine = None
-    return _sota_engine
-
-
-@app.route('/api/sota/decision', methods=['POST'])
-def api_sota_decision():
-    """SOTA 综合决策 API - 整合 LLM Multi-Agent + Factor Mining + Multi-Modal + RL"""
-    try:
-        engine = _get_sota_engine()
-        if engine is None:
-            return jsonify({'success': False, 'error': 'SOTA Engine not initialized'}), 503
-
-        # Parse request body
-        body = request.json if request.is_json else {}
-        stock_code = body.get('stock_code', 'sz300620')
-        portfolio_state = body.get('portfolio_state', {})
-
-        # Get stock data
-        stock_data = get_stock_data(stock_code)
-        if not stock_data:
-            return jsonify({'success': False, 'error': 'Failed to fetch stock data'}), 500
-
-        # Execute SOTA decision pipeline
-        decision = engine.make_decision(stock_data, portfolio_state)
-
-        return jsonify({
-            'success': True,
-            'stock_code': stock_code,
-            'decision': {
-                'llm': decision.llm_decision,
-                'factors': decision.factor_scores,
-                'new_factors': decision.new_factors,
-                'cross_modal': decision.cross_modal,
-                'rl_action': decision.rl_action,
-                'rl_confidence': decision.rl_confidence,
-                'rl_position_size': decision.rl_position_size,
-                'ensemble_score': decision.ensemble_score,
-                'ensemble_direction': decision.ensemble_direction,
-                'execution_time_ms': round(decision.execution_time_ms, 1)
-            },
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"[SOTA Decision] Error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/sota/decision/<stock_code>')
-def api_sota_decision_get(stock_code):
-    """SOTA 决策 API (GET version)"""
-    return api_sota_decision()
-
-
-@app.route('/api/sota/factors')
-def api_sota_factors():
-    """SOTA 因子挖掘结果"""
-    try:
-        engine = _get_sota_engine()
-        if engine is None:
-            return jsonify({'success': False, 'error': 'SOTA Engine not initialized'}), 503
-
-        stock_code = request.args.get('stock_code', 'sz300620')
-        stock_data = get_stock_data(stock_code)
-        if not stock_data:
-            return jsonify({'success': False, 'error': 'Failed to fetch stock data'}), 500
-
-        factors = engine.factor_mining.mine_and_evaluate(stock_data, {})
-        factor_list = [
-            {
-                'name': f.name,
-                'ic': round(f.ic, 4),
-                'icir': round(f.icir, 4),
-                'efficacy': round(f.efficacy, 4),
-                'description': f.description
-            }
-            for f in factors
-        ]
-
-        return jsonify({
-            'success': True,
-            'stock_code': stock_code,
-            'factors': factor_list,
-            'factor_count': len(factor_list),
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"[SOTA Factors] Error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/sota/cross-modal')
-def api_sota_cross_modal():
-    """SOTA 多模态分析"""
-    try:
-        engine = _get_sota_engine()
-        if engine is None:
-            return jsonify({'success': False, 'error': 'SOTA Engine not initialized'}), 503
-
-        stock_code = request.args.get('stock_code', 'sz300620')
-        stock_data = get_stock_data(stock_code)
-        if not stock_data:
-            return jsonify({'success': False, 'error': 'Failed to fetch stock data'}), 500
-
-        cross_modal = engine.multi_modal.analyze(stock_data)
-
-        return jsonify({
-            'success': True,
-            'stock_code': stock_code,
-            'analysis': cross_modal,
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"[SOTA Cross-Modal] Error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/sota/ensemble')
-def api_sota_ensemble():
-    """SOTA 集成聚合配置"""
-    return jsonify({
-        'success': True,
-        'weights': {
-            'llm_multi_agent': 0.40,
-            'factor_mining': 0.20,
-            'multi_modal': 0.15,
-            'rl_execution': 0.25
-        },
-        'direction_thresholds': {
-            'bullish': 0.6,
-            'bearish': 0.4
-        },
-        'model_layers': {
-            'llm': 'TradingAgents v0.2.5',
-            'factors': 'AlphaCrafter',
-            'cross_modal': 'FCMR',
-            'rl': 'Trading-R1'
-        },
-        'timestamp': datetime.now().isoformat()
-    })
-
-
-@app.route('/api/sota/rl')
-def api_sota_rl():
-    """SOTA RL 执行状态"""
-    try:
-        engine = _get_sota_engine()
-        if engine is None:
-            return jsonify({
-                'success': True,
-                'rl_action': 'hold',
-                'rl_confidence': 0.5,
-                'rl_position_size': 0.0,
-                'status': 'engine_not_initialized'
-            })
-
-        return jsonify({
-            'success': True,
-            'rl_action': 'hold',
-            'rl_confidence': 0.6,
-            'rl_position_size': 0.1,
-            'rl_available': True,
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"[SOTA RL] Error: {e}")
-        return jsonify({'success': False, 'error': str(e)})
-
-
-@app.route('/api/sota/decisions')
-def api_sota_decisions():
-    """SOTA 最近决策历史"""
-    try:
-        engine = _get_sota_engine()
-        if engine is None:
-            return jsonify({'success': False, 'error': 'SOTA Engine not initialized'}), 503
-
-        limit = request.args.get('limit', 10, type=int)
-        recent = engine.get_recent_decisions(limit)
-
-        return jsonify({
-            'success': True,
-            'decisions': recent,
-            'count': len(recent),
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"[SOTA Decisions] Error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-
-@app.route('/api/sota/dashboard')
-def api_sota_dashboard():
-    """SOTA Dashboard 汇总数据"""
-    try:
-        stock_code = request.args.get('stock_code', 'sz300620')
-        stock_data = get_stock_data(stock_code)
-        if not stock_data:
-            return jsonify({'success': False, 'error': 'Failed to fetch stock data'}), 500
-
-        # Parallel execution of all SOTA layers
-        factors = engine.factor_mining.mine_and_evaluate(stock_data, {})
-        cross_modal = engine.multi_modal.analyze(stock_data)
-
-        factor_count = len(factors)
-        top_factors = sorted(factors, key=lambda f: f.efficacy, reverse=True)[:3]
-
-        return jsonify({
-            'success': True,
-            'stock_code': stock_code,
-            'summary': {
-                'stock_name': stock_data.get('name', ''),
-                'price': stock_data.get('price', 0),
-                'change_pct': stock_data.get('change_pct', 0),
-                'volume': stock_data.get('volume', 0),
-                'factor_count': factor_count,
-                'cross_modal_layers': len(cross_modal.get('layers', [])),
-            },
-            'top_factors': [
-                {'name': f.name, 'efficacy': round(f.efficacy, 4)}
-                for f in top_factors
-            ],
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"[SOTA Dashboard] Error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-# ============================================================================
-# SOTA Dashboard Route
-# ============================================================================
-
-@app.route('/sota_dashboard.html')
-def sota_dashboard():
-    """SOTA Quantitative Model Dashboard page"""
-    return send_file("sota_dashboard.html")

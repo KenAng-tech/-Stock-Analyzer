@@ -12,7 +12,7 @@ from modules.logger import logger
 from modules.absolute_momentum import absolute_momentum
 from modules.adaptive_kelly import adaptive_kelly
 from modules.dynamic_rsi import dynamic_rsi
-from modules.garch_volatility import garch_volatility
+from modules.factors.garch_volatility import garch_volatility
 from modules.multi_factor_model import multi_factor_model
 
 

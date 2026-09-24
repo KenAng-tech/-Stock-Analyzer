@@ -94,7 +94,7 @@ class PortfolioManager:
             
             try:
                 data = json.loads(response.content)
-            except:
+            except Exception:
                 data = {"allocation": {}, "total_exposure": 0, "cash_reserve": 0,
                        "rebalance_needed": False, "risk_adjustment": "保持",
                        "reasoning": "投资组合决策"}

@@ -1,0 +1,219 @@
+/* ═══════════════════════════════════════════════════════════
+   Stock Analyzer — Chart & Data Visualization Styles
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Gauge / Speedometer ─────────────────────────────── */
+.gauge-container {
+  position: relative;
+  width: 100%;
+  max-width: 220px;
+  margin: 0 auto;
+}
+
+.gauge-svg { width: 100%; height: auto; }
+.gauge-value-text {
+  position: absolute;
+  bottom: 25%;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 1.8rem;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ── Progress / Distribution Bars ─────────────────────── */
+.dist-bar, .chip-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  overflow: hidden;
+  position: relative;
+}
+
+.dist-bar-fill, .chip-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width var(--transition-normal);
+}
+
+.dist-bar-value, .chip-bar-value {
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ── RSI Bar ──────────────────────────────────────────── */
+.rsi-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(to right, var(--bear), var(--neutral), var(--bull));
+  position: relative;
+}
+
+.rsi-marker {
+  position: absolute;
+  top: -4px;
+  width: 3px;
+  height: 14px;
+  background: var(--text-primary);
+  border-radius: 2px;
+}
+
+/* ── Score Circle ─────────────────────────────────────── */
+.score-circle {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ── ML Probability Bar ───────────────────────────────── */
+.ml-prob-bar {
+  height: 20px;
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  overflow: hidden;
+  position: relative;
+}
+
+.ml-prob-fill {
+  height: 100%;
+  border-radius: 10px;
+  transition: width var(--transition-normal);
+}
+
+/* ── ML Feature Importance ────────────────────────────── */
+.fi-bar {
+  height: 16px;
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  overflow: hidden;
+  position: relative;
+}
+
+.fi-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width var(--transition-normal);
+}
+
+/* ── Heatmap ──────────────────────────────────────────── */
+.heatmap-grid {
+  display: grid;
+  gap: 2px;
+}
+
+.heatmap-cell {
+  padding: 4px;
+  text-align: center;
+  font-size: 0.75rem;
+  border-radius: 2px;
+}
+
+/* ── Chart Containers ─────────────────────────────────── */
+.chart-container {
+  position: relative;
+  width: 100%;
+  min-height: 200px;
+}
+
+.chart-container canvas {
+  width: 100% !important;
+  height: auto !important;
+}
+
+/* ── Sparkline ────────────────────────────────────────── */
+.sparkline {
+  display: inline-block;
+  width: 60px;
+  height: 24px;
+}
+
+/* ── Walk-Forward Windows ─────────────────────────────── */
+.wf-window {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  margin-bottom: 8px;
+  background: var(--bg-card);
+}
+
+.wf-window.active {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+/* ── Loading / Spinner ────────────────────────────────── */
+.loading-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--transition-normal);
+}
+
+.loading-overlay.active {
+  opacity: 1;
+  pointer-events: all;
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--bg-tertiary);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.spinner-icon {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--bg-tertiary);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.loading-text {
+  margin-top: 12px;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.loading-progress {
+  width: 200px;
+  height: 3px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  margin-top: 12px;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  animation: progressIndeterminate 1.5s ease-in-out infinite;
+  width: 40%;
+}
+
+@keyframes progressIndeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}

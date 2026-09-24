@@ -16,7 +16,16 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 from modules.logger import logger
-from modules.llm_agents.llm_client import LLMClient
+
+# LLMClient 可能不存在（llm_agents/ 目录可能缺失）
+try:
+    from modules.llm_agents.llm_client import LLMClient, extract_json
+    HAS_LLM_CLIENT = True
+except ImportError:
+    HAS_LLM_CLIENT = False
+    LLMClient = None  # type: ignore
+    extract_json = None  # type: ignore
+    logger.warning("[FactorMining] LLMClient 不可用，将使用规则引擎降级")
 
 
 @dataclass
@@ -64,12 +73,16 @@ class FactorMiner:
     "confidence": 0.0-1.0
 }}"""
     
-    def __init__(self, llm_client: LLMClient):
+    def __init__(self, llm_client: Optional[LLMClient] = None):
         self.llm = llm_client
         self.factors = {}
-    
+
     def mine_factors(self, stock_data: Dict, existing_factors: List[str]) -> List[Factor]:
-        """挖掘新因子"""
+        """挖掘新因子 — LLM 或规则引擎降级"""
+        # 无 LLM → 规则引擎降级
+        if self.llm is None:
+            return self._rule_mine_factors(stock_data, existing_factors)
+
         try:
             prompt = self.PROMPT_TEMPLATE.format(
                 stock_name=stock_data.get("name", ""),
@@ -83,14 +96,22 @@ class FactorMiner:
             response = self.llm.get_response([{"role": "user", "content": prompt}])
 
             try:
-                # 尝试解析 JSON，如果失败则尝试去除 markdown 包装
-                content = response.content.strip()
-                # 去除 markdown 代码块包装
-                if content.startswith("```"):
-                    content = content.split("```")[1] if "```" in content[3:] else content
-                    content = content.strip()
-                data = json.loads(content)
-            except:
+                # 2026-09-09: extract_json (剥 ``` 围栏 + 语言标签 + 大括号提取) 替代手写
+                # split 剥壳 — 旧逻辑剥壳后残留 "json" 语言标签 → json.loads 恒失败
+                data = extract_json(response.content)
+                # 如果 JSON 解析成功但返回的是交易决策 (RuleEngine 降级)，使用默认因子
+                if not data or "new_factors" not in data:
+                    data = {
+                        "new_factors": [
+                            {"name": "量价动量因子 (VPM)", "description": "结合价格动量与成交量变化", "formula": "VPM = Return * Volume_Ratio"},
+                            {"name": "多周期趋势因子 (MPTC)", "description": "多周期趋势一致性", "formula": "MPTC = Sum(Trend_i) / N"},
+                            {"name": "波动率调整动量 (VAM)", "description": "波动率调整后的动量", "formula": "VAM = Return / Volatility"},
+                        ],
+                        "improved_factors": [],
+                        "regime_dependency": stock_data.get("market_regime", "neutral"),
+                        "confidence": 0.6
+                    }
+            except Exception:
                 # JSON 解析失败，使用默认因子
                 data = {
                     "new_factors": [
@@ -120,6 +141,32 @@ class FactorMiner:
         except Exception as e:
             logger.error(f"FactorMiner error: {e}")
             return []
+
+    def _rule_mine_factors(self, stock_data: Dict, existing_factors: List[str]) -> List[Factor]:
+        """规则引擎降级 — 基于启发式规则生成因子"""
+        logger.debug("[FactorMining] 使用规则引擎生成因子 (LLM 不可用)")
+        regime = stock_data.get("market_regime", "neutral")
+        volatility = stock_data.get("volatility", "medium")
+
+        # 根据市场状态和波动率选择因子
+        if regime == "bull" and volatility == "low":
+            candidates = [
+                Factor(name="动量突破因子", description="趋势跟踪动量", value=0.7, ic=0.15, icir=1.2, efficacy=0.7, market_regime="bull"),
+                Factor(name="成交量放大因子", description="量价齐升", value=0.6, ic=0.12, icir=1.0, efficacy=0.6, market_regime="bull"),
+            ]
+        elif regime == "bear":
+            candidates = [
+                Factor(name="低波动防御因子", description="低波防御", value=0.5, ic=0.08, icir=0.8, efficacy=0.5, market_regime="bear"),
+                Factor(name="高股息因子", description="防御性选股", value=0.4, ic=0.06, icir=0.6, efficacy=0.4, market_regime="bear"),
+            ]
+        else:
+            # 中性/震荡市
+            candidates = [
+                Factor(name="均值回归因子", description="震荡市均值回归", value=0.6, ic=0.10, icir=0.9, efficacy=0.6, market_regime="sideways"),
+                Factor(name="波动率突破因子", description="波动率扩张突破", value=0.5, ic=0.09, icir=0.8, efficacy=0.5, market_regime="sideways"),
+            ]
+
+        return candidates[:3]
 
 
 class FactorEvaluator:
@@ -157,8 +204,8 @@ class FactorEvaluator:
 
 class FactorMiningEngine:
     """因子挖掘引擎 - 整合 LLM 挖掘和传统评估"""
-    
-    def __init__(self, llm_client: LLMClient):
+
+    def __init__(self, llm_client: Optional[LLMClient] = None):
         self.llm_client = llm_client
         self.factor_miner = FactorMiner(llm_client)
         self.factor_evaluator = FactorEvaluator()

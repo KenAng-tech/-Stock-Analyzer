@@ -118,37 +118,55 @@ class DynamicCache:
     """
 
     # 预定义分类及其默认 TTL（秒）
+    # P2 优化 (2026-07-01): 区分实时数据缓存和模型缓存
     DEFAULT_TTLS = {
-        'realtime': 30,       # 实时行情
-        'kline': 30,          # K 线数据
-        'technical': 60,      # 技术指标
-        'ml': 60,             # ML 预测
-        'factor': 300,        # 因子计算
-        'fundamental': 300,   # 基本面
-        'sentiment': 300,     # 情感分析
-        'industry': 600,      # 行业数据
-        'strategy': 120,      # 策略结果
-        'default': 60,        # 默认
+        'realtime': 30,         # 实时行情 — 30s
+        'kline': 300,           # K 线数据 — 5min
+        'technical': 300,       # 技术指标 — 5min
+        'ml': 86400,            # ML 预测 — 24h (模型训练耗时数分钟)
+        'factor': 3600,         # 因子计算 — 1h
+        'factor_scores': 3600,  # 因子评分 — 1h
+        'fundamental': 86400,   # 基本面 — 24h (财报不常变)
+        'sentiment': 3600,      # 情感分析 — 1h
+        'sentiment_factor': 3600,  # 情绪因子 — 1h
+        'time_llm': 86400,      # Time-LLM 预测 — 24h
+        'regime_switching': 86400,  # Regime-Switching — 24h
+        'itransformer': 86400,    # iTransformer — 24h
+        'patchtst': 86400,        # PatchTST — 24h
+        'industry': 86400,        # 行业数据 — 24h
+        'strategy': 300,          # 策略结果 — 5min
+        'backtest': 86400,        # 回测结果 — 24h
+        'default': 300,           # 默认 — 5min
     }
 
     # 依赖关系：当某类数据更新时，自动失效的下游分类
-    # 例如：realtime 数据更新 → technical / factor / ml 全部失效
     DEPENDENCY_CHAIN = {
-        'realtime': ['technical', 'factor', 'ml'],
-        'kline': ['technical', 'factor', 'ml'],
+        'realtime': ['technical', 'factor', 'ml', 'time_llm', 'itransformer'],
+        'kline': ['technical', 'factor', 'ml', 'time_llm', 'itransformer'],
         'technical': ['factor', 'ml'],
         'fundamental': ['factor'],
-        'sentiment': [],
+        'sentiment': ['sentiment_factor'],
+        'sentiment_factor': [],
         'industry': [],
         'strategy': [],
+        'time_llm': ['ml'],  # Time-LLM 更新 → ML 预测失效
+        'itransformer': ['ml'],
     }
 
-    def __init__(self):
+    def __init__(self, max_size: int = 10000):
+        """
+        动态缓存管理器
+
+        Args:
+            max_size: 最大缓存条目数，超过时触发 LRU 淘汰（默认 10000）
+        """
+        self.max_size = max_size
         self._store: Dict[str, CacheEntry] = {}
         self._lock = threading.RLock()
         self._ttl_overrides: Dict[str, float] = {}
         self._category_map: Dict[str, str] = {}  # key -> category（用于按分类清除）
         self._stats = CacheStats()
+        self._eviction_count: int = 0  # 累计淘汰数
 
     # ── TTL 管理 ──────────────────────────────────────────────────
 
@@ -182,11 +200,15 @@ class DynamicCache:
     def set(self, key: str, data: Any,
             category: str = 'default', ttl: Optional[float] = None,
             tags: Optional[Set[str]] = None):
-        """设置缓存数据，自动标记依赖链失效"""
+        """设置缓存数据，自动标记依赖链失效 + LRU 淘汰"""
         effective_ttl = ttl or self.get_ttl(category)
         with self._lock:
             # 如果写入的是 realtime/kline 等上游数据，自动使依赖链失效
             self._invalidate_dependents(category)
+
+            # LRU 淘汰: 如果超过容量，删除最少访问的条目
+            while len(self._store) >= self.max_size:
+                self._evict_lru()
 
             self._store[key] = CacheEntry(
                 data=data,
@@ -196,6 +218,16 @@ class DynamicCache:
                 tags=tags or set(),
             )
             self._category_map[key] = category
+
+    def _evict_lru(self):
+        """淘汰最少访问的缓存条目 (LRU)"""
+        if not self._store:
+            return
+        # 按 access_count 升序排序，淘汰最少的
+        lru_key = min(self._store, key=lambda k: self._store[k].access_count)
+        del self._store[lru_key]
+        self._category_map.pop(lru_key, None)
+        self._eviction_count += 1
 
     def invalidate(self, key: str):
         """使单个缓存键失效"""
@@ -299,11 +331,22 @@ class DynamicCache:
             for v in self._store.values():
                 by_cat[v.category] += 1
 
+            # 计算数据库文件大小
+            try:
+                import os
+                db_path = getattr(self, '_db_path', None)
+                db_size_mb = 0.0
+                if db_path and os.path.exists(db_path):
+                    db_size_mb = os.path.getsize(db_path) / (1024 * 1024)
+            except Exception:
+                db_size_mb = 0.0
+
             return {
                 'total_entries': total,
                 'active_entries': active,
                 'expired_entries': expired,
                 'total_accesses': total_accesses,
+                'db_size_mb': round(db_size_mb, 2),
                 'categories': dict(self.DEFAULT_TTLS),
                 'entries_by_category': dict(by_cat),
                 'ttl_overrides': dict(self._ttl_overrides),

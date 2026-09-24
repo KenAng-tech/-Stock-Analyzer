@@ -18,7 +18,11 @@ LLM Client — 多模型客户端 + 故障转移 + 熔断器 + 降级策略
 import json
 import os
 import time
+import threading
 import http.client
+
+# 8080 链全局反压 (2026-09-02; 与 llm_router.Semaphore(2) 并立 = 两条链各自 ≤2)
+_CLIENT_SEMAPHORE = threading.Semaphore(2)
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
@@ -28,6 +32,39 @@ from modules.logger import logger
 
 
 # ── 枚举类型 ──────────────────────────────────────────────────
+
+def extract_json(text: str) -> Optional[Dict]:
+    """从 LLM 输出提取 JSON dict (2026-09-09 新增)。
+
+    解析链: 直解 → 剥离 ```json 代码块围栏 → 提取最外层 {...}。
+    全部失败返回 None (调用方走规则引擎默认值)。
+    GLM/Qwen 系模型常把 JSON 包在代码块或夹在思考 filler 中,
+    直接 json.loads(content) 会恒失败 — 本函数是最后一道防线。
+    """
+    if not text:
+        return None
+    t = text.strip()
+    if t.startswith("```"):
+        first_nl = t.find('\n')
+        if first_nl != -1:
+            t = t[first_nl + 1:]
+        if t.rstrip().endswith("```"):
+            t = t.rstrip()[:-3]
+        t = t.strip()
+    try:
+        data = json.loads(t)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        pass
+    s, e = t.find('{'), t.rfind('}')
+    if 0 <= s < e:
+        try:
+            data = json.loads(t[s:e + 1])
+            return data if isinstance(data, dict) else None
+        except Exception:
+            pass
+    return None
+
 
 class CircuitState(Enum):
     """熔断器状态"""
@@ -222,9 +259,39 @@ class OmlxClient:
         self.base_url = base_url
         self.model = model
         self.timeout = timeout
+        self._api_key = self._load_api_key()
+
+    @staticmethod
+    def _load_api_key() -> str:
+        """从 OMLX settings.json 读取 API Key"""
+        settings_path = os.path.expanduser("~/.omlx/settings.json")
+        try:
+            with open(settings_path, 'r') as f:
+                settings = json.load(f)
+            key = settings.get('auth', {}).get('api_key', '')
+            if key:
+                return key
+        except Exception:
+            pass
+        # Fallback: 环境变量 (不设置则返回 None)
+        return os.environ.get("OMLX_API_KEY")
 
     def chat(self, messages: List[Dict], temperature: float = 0.7,
-             max_tokens: int = 2048) -> LLMResponse:
+             max_tokens: int = 512) -> LLMResponse:
+        """8080 调用入口 — Semaphore(2) 反压 (2026-09-02, 饱和 25s 超时快速失败).
+        2026-09-09: max_tokens 2048→512 (42s→11s/调用, 见 get_response 注释)"""
+        if not _CLIENT_SEMAPHORE.acquire(timeout=25.0):
+            logger.warning("[LLMClient] 8080 反压饱和 (semaphore 25s 超时), 快速失败")
+            return LLMResponse(
+                content='{"error": "llm saturated"}', model="saturated",
+                finish_reason="saturated")
+        try:
+            return self._chat_locked(messages, temperature, max_tokens)
+        finally:
+            _CLIENT_SEMAPHORE.release()
+
+    def _chat_locked(self, messages: List[Dict], temperature: float = 0.7,
+                     max_tokens: int = 2048) -> LLMResponse:
         try:
             body = {
                 "model": self.model,
@@ -232,6 +299,10 @@ class OmlxClient:
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "stream": False,
+                # 2026-09-09: 禁用 thinking 链 — GLM-4.7 默认先输出 ~512 tok 思考 filler
+                # (实测 25.7s/调用且 filler 挤爆 512 预算, JSON 被截掉 → json.loads 恒失败
+                # → 规则引擎默认值 = 假 LLM 链)。关闭后直出 ```json 代码块 JSON, 68 tok/16.9s。
+                "chat_template_kwargs": {"enable_thinking": False},
             }
 
             conn = http.client.HTTPConnection(
@@ -240,7 +311,7 @@ class OmlxClient:
             conn.request(
                 "POST", "/v1/chat/completions",
                 json.dumps(body),
-                {"Content-Type": "application/json", "x-api-key": "953357"},
+                {"Content-Type": "application/json", "Authorization": f"Bearer {self._api_key}"},
             )
             response = conn.getresponse()
             data = json.loads(response.read().decode())
@@ -279,16 +350,25 @@ class OpenAIClient:
     """OpenAI 客户端 — GPT-5.5, GPT-5.4"""
 
     def __init__(self, api_key: Optional[str] = None,
-                 model: str = "gpt-5.5", timeout: float = 30.0):
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+                 model: str = "gpt-5.5", timeout: float = 30.0,
+                 base_url: Optional[str] = None):
+        self.api_key = api_key or ""
         self.model = model
         self.timeout = timeout
+        self.base_url = base_url  # None = openai SDK 默认 (外部 api.openai.com)
+
+    def _make_client(self, timeout: float):
+        """构建 openai 客户端 (2026-09-13: 支持 base_url 指向本地 OMLX)"""
+        import openai
+        kwargs = {'api_key': self.api_key, 'timeout': timeout}
+        if self.base_url:
+            kwargs['base_url'] = self.base_url
+        return openai.OpenAI(**kwargs)
 
     def chat(self, messages: List[Dict], temperature: float = 0.7,
              max_tokens: int = 2048) -> LLMResponse:
         try:
-            import openai
-            client = openai.OpenAI(api_key=self.api_key, timeout=self.timeout)
+            client = self._make_client(self.timeout)
             response = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -309,8 +389,7 @@ class OpenAIClient:
 
     def health_check(self) -> bool:
         try:
-            import openai
-            client = openai.OpenAI(api_key=self.api_key, timeout=5)
+            client = self._make_client(5)
             client.models.list()
             return True
         except Exception:
@@ -443,19 +522,22 @@ class LLMClient:
 
     def _init_clients(self):
         """初始化所有可用的客户端"""
-        # OMLX (本地) — 使用 OMLX Proxy (port 8082)
+        # OMLX (本地) — 直连 8080 (proxy 8082 可能不可用)
         self.clients['omlx'] = OmlxClient(
-            base_url=self.config.get('omlx_url', 'http://127.0.0.1:8082'),
-            model=self.config.get('omlx_model', 'MiniMax-M2.7-4bit-mxfp4'),
-            timeout=self.config.get('omlx_timeout', 120.0),  # 2分钟超时 (模型加载慢)
+            base_url=self.config.get('omlx_url', 'http://127.0.0.1:8080'),
+            model=self.config.get('omlx_model', 'GLM-4.7-Flash-MLX-8bit'),
+            timeout=self.config.get('omlx_timeout', 30.0),
         )
 
-        # OpenAI
-        if self.config.get('openai_key') or os.environ.get('OPENAI_API_KEY'):
+        # OpenAI (2026-09-13 死链修复: 原 `or os.environ.get('OPENAI_API_KEY')` 导致
+        # 任意环境只要有 sk-local 占位 key 就注册此 client → 链尾恒打 api.openai.com
+        # 401, 空耗 30s 超时。现在仅显式配置 openai_key 才注册)
+        if self.config.get('openai_key'):
             self.clients['openai'] = OpenAIClient(
                 api_key=self.config.get('openai_key'),
                 model=self.config.get('openai_model', 'gpt-5.5'),
                 timeout=self.config.get('openai_timeout', 30.0),
+                base_url=self.config.get('openai_base_url'),
             )
 
         # Anthropic
@@ -466,12 +548,14 @@ class LLMClient:
                 timeout=self.config.get('anthropic_timeout', 30.0),
             )
 
-        # Ollama (本地)
-        self.clients['ollama'] = OllamaClient(
-            base_url=self.config.get('ollama_url', 'http://127.0.0.1:11434'),
-            model=self.config.get('ollama_model', 'llama3'),
-            timeout=self.config.get('ollama_timeout', 60.0),
-        )
+        # Ollama (2026-09-13 死链修复: 11434 从未部署, 原默认注册导致每次决策链
+        # 在 openai 失败后再撞一次 Connection refused. 现在显式配置 ollama_url 才注册)
+        if self.config.get('ollama_url'):
+            self.clients['ollama'] = OllamaClient(
+                base_url=self.config.get('ollama_url'),
+                model=self.config.get('ollama_model', 'llama3'),
+                timeout=self.config.get('ollama_timeout', 60.0),
+            )
 
     def _init_circuit_breakers(self):
         """为每个客户端初始化熔断器"""
@@ -483,7 +567,10 @@ class LLMClient:
             )
 
     def get_response(self, messages: List[Dict], temperature: float = 0.7,
-                     max_tokens: int = 2048, model: Optional[str] = None) -> LLMResponse:
+                     # 2026-09-09: 2048→512 — M4 Max 实测 48 tok/s: 2048 满生成=42s/调用,
+                     # 决策链 10+ 串行调用数学上不可能完成 (恒超时降级)。512≈11s/调用,
+                     # 辩论/因子/风险类输出均为短 JSON, 512 足够 (单测: 42.2s vs 42.3s 冷/热同速)
+                     max_tokens: int = 512, model: Optional[str] = None) -> LLMResponse:
         """
         获取 LLM 响应 — 自动故障转移 + 熔断
 

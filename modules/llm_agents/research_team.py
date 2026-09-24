@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
 from modules.logger import logger
-from modules.llm_agents.llm_client import LLMClient, LLMResponse
+from modules.llm_agents.llm_client import LLMClient, LLMResponse, extract_json
 
 
 @dataclass
@@ -80,10 +80,9 @@ class BullResearcher:
             
             response = self.llm.get_response([{"role": "user", "content": prompt}])
             
-            try:
-                data = json.loads(response.content)
-            except:
-                data = {"position": "moderate_bull", "confidence": 0.5, 
+            data = extract_json(response.content)
+            if not data:
+                data = {"position": "moderate_bull", "confidence": 0.5,
                        "arguments": ["LLM 分析"], "catalysts": []}
             
             return ResearchDebate(
@@ -146,9 +145,8 @@ class BearResearcher:
             
             response = self.llm.get_response([{"role": "user", "content": prompt}])
             
-            try:
-                data = json.loads(response.content)
-            except:
+            data = extract_json(response.content)
+            if not data:
                 data = {"position": "moderate_bear", "confidence": 0.5,
                        "arguments": ["LLM 分析"], "risks": []}
             
@@ -219,9 +217,8 @@ class ResearchManager:
             
             response = self.llm.get_response([{"role": "user", "content": prompt}])
             
-            try:
-                data = json.loads(response.content)
-            except:
+            data = extract_json(response.content)
+            if not data:
                 data = {"final_direction": "neutral", "confidence": 0.5,
                        "bull_weight": 0.5, "bear_weight": 0.5,
                        "reasoning": "综合评估", "recommendation": "hold",

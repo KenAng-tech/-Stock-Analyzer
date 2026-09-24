@@ -1,0 +1,615 @@
+#!/usr/bin/env python3
+# -*- coding:utf-8 -*-
+"""
+多智能体共识决策引擎 (Multi-Agent Consensus Engine)
+
+多个独立智能体分别分析不同维度，通过投票/加权共识生成最终决策。
+
+智能体角色:
+- 技术分析师: 基于技术指标 (RSI/MACD/布林带/KDJ)
+- 基本面分析师: 基于财务数据 (ROE/营收/利润/毛利率)
+- 情绪分析师: 基于新闻/股吧情感
+- 量化分析师: 基于多因子模型 (Alpha158/21因子)
+- 时序预测师: 基于时序基础模型 (Moirai/TimesFM/PatchTST)
+- RL 交易员: 基于强化学习决策
+
+共识机制:
+- 多数投票 (Majority Vote)
+- 加权投票 (Weighted Vote, 基于历史 IC)
+- 置信度加权 (Confidence-Weighted)
+- 冲突检测 (Conflict Detection)
+
+用法:
+    engine = MultiAgentConsensus()
+    result = engine.decide('sz300620')
+    print(result['consensus'], result['confidence'], result['agents'])
+"""
+
+import json
+import numpy as np
+from datetime import datetime
+from typing import Dict, List, Optional, Any
+from dataclasses import dataclass, field, asdict
+from enum import Enum
+
+from modules.logger import logger
+
+
+class AgentRole(Enum):
+    """智能体角色"""
+    TECHNICAL = 'technical'
+    FUNDAMENTAL = 'fundamental'
+    SENTIMENT = 'sentiment'
+    QUANT = 'quant'
+    TIMESERIES = 'timeseries'
+    RL = 'rl'
+
+
+class Decision(Enum):
+    """交易决策"""
+    STRONG_BUY = 'strong_buy'
+    BUY = 'buy'
+    NEUTRAL = 'neutral'
+    SELL = 'sell'
+    STRONG_SELL = 'strong_sell'
+
+
+@dataclass
+class AgentVote:
+    """智能体投票"""
+    role: str
+    decision: str
+    confidence: float  # 0-1
+    reasoning: str = ''
+    weight: float = 1.0  # 智能体权重
+
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'AgentVote':
+        return cls(
+            role=data['role'],
+            decision=data['decision'],
+            confidence=data.get('confidence', 0.5),
+            reasoning=data.get('reasoning', ''),
+            weight=data.get('weight', 1.0),
+        )
+
+
+@dataclass
+class ConsensusResult:
+    """共识结果"""
+    stock_code: str
+    consensus: str  # strong_buy/buy/neutral/sell/strong_sell
+    confidence: float  # 0-1
+    vote_count: Dict[str, int]  # 各决策的票数
+    agent_votes: List[Dict]  # 各智能体投票
+    weights: Dict[str, float]  # 各角色权重
+    conflict: bool  # 是否存在冲突 (多空分歧大)
+    conflict_ratio: float  # 多空比例
+    timestamp: str = ''
+    reasoning: str = ''
+
+    def to_dict(self) -> Dict:
+        d = asdict(self)
+        d['consensus'] = self.consensus
+        return d
+
+
+class MultiAgentConsensus:
+    """多智能体共识决策引擎"""
+
+    # 默认角色权重
+    DEFAULT_WEIGHTS = {
+        'technical': 1.0,
+        'fundamental': 1.0,
+        'sentiment': 0.8,
+        'quant': 1.2,
+        'timeseries': 1.1,
+        'rl': 0.9,
+    }
+
+    def __init__(self, weights: Optional[Dict[str, float]] = None):
+        self.weights = weights or dict(self.DEFAULT_WEIGHTS)
+        self._history: List[ConsensusResult] = []
+        self._decision_engine = None
+        self._analysis_engine = None
+
+    def set_dependencies(self, decision_engine, analysis_engine):
+        """设置依赖 — 在 app.py 初始化后调用"""
+        self._decision_engine = decision_engine
+        self._analysis_engine = analysis_engine
+
+    def decide(self, stock_code: str, history: Optional[Any] = None) -> ConsensusResult:
+        """
+        多智能体共识决策
+
+        Args:
+            stock_code: 股票代码
+            history: 历史数据 (可选，如果为 None 则从 data_fetcher 获取)
+
+        Returns:
+            ConsensusResult
+        """
+        logger.info(f"[MultiAgent] 开始共识决策: {stock_code}")
+
+        # 收集各智能体投票
+        votes = []
+
+        # 1. 技术分析师
+        votes.append(self._analyze_technical(stock_code, history))
+
+        # 2. 基本面分析师
+        votes.append(self._analyze_fundamental(stock_code, history))
+
+        # 3. 情绪分析师
+        votes.append(self._analyze_sentiment(stock_code, history))
+
+        # 4. 量化分析师
+        votes.append(self._analyze_quant(stock_code, history))
+
+        # 5. 时序预测师
+        votes.append(self._analyze_timeseries(stock_code, history))
+
+        # 6. RL 交易员
+        votes.append(self._analyze_rl(stock_code, history))
+
+        # 过滤失败的智能体
+        valid_votes = [v for v in votes if v is not None]
+        failed = sum(1 for v in votes if v is None)
+        if failed:
+            logger.warning(f"[MultiAgent] {failed} 个智能体决策失败")
+
+        # 计算共识
+        result = self._compute_consensus(stock_code, valid_votes)
+
+        # 记录历史
+        self._history.append(result)
+        if len(self._history) > 1000:
+            self._history = self._history[-500:]
+
+        logger.info(
+            f"[MultiAgent] 共识: {result.consensus} "
+            f"(置信度 {result.confidence:.2f}, 冲突 {result.conflict})"
+        )
+        return result
+
+    def _get_decision(self, pct_change: float) -> str:
+        """根据预期涨跌幅转换为决策"""
+        if pct_change > 5:
+            return Decision.STRONG_BUY.value
+        elif pct_change > 2:
+            return Decision.BUY.value
+        elif pct_change < -5:
+            return Decision.STRONG_SELL.value
+        elif pct_change < -2:
+            return Decision.SELL.value
+        else:
+            return Decision.NEUTRAL.value
+
+    def _analyze_technical(self, stock_code: str, history) -> Optional[AgentVote]:
+        """技术分析师: 基于技术指标"""
+        try:
+            from modules.kline_signal_analyzer import KlineSignalAnalyzer
+            analyzer = KlineSignalAnalyzer()
+            signals = analyzer.analyze(stock_code)
+
+            # 综合 RSI/MACD/KDJ 信号
+            score = 0
+            reasons = []
+
+            rsi = signals.get('rsi', {})
+            rsi_val = rsi.get('value', 50)
+            if rsi_val < 30:
+                score += 1
+                reasons.append(f"RSI超卖({rsi_val:.1f})")
+            elif rsi_val > 70:
+                score -= 1
+                reasons.append(f"RSI超买({rsi_val:.1f})")
+
+            macd = signals.get('macd', {})
+            macd_hist = macd.get('histogram', 0)
+            if macd_hist > 0:
+                score += 1
+                reasons.append("MACD金叉")
+            else:
+                score -= 1
+                reasons.append("MACD死叉")
+
+            kdj = signals.get('kdj', {})
+            kdj_k = kdj.get('k', 50)
+            if kdj_k < 20:
+                score += 1
+                reasons.append(f"KDJ超卖({kdj_k:.1f})")
+            elif kdj_k > 80:
+                score -= 1
+                reasons.append(f"KDJ超买({kdj_k:.1f})")
+
+            # 转换为决策
+            if score >= 2:
+                decision = Decision.BUY.value
+                confidence = 0.7
+            elif score <= -2:
+                decision = Decision.SELL.value
+                confidence = 0.7
+            else:
+                decision = Decision.NEUTRAL.value
+                confidence = 0.5
+
+            return AgentVote(
+                role=AgentRole.TECHNICAL.value,
+                decision=decision,
+                confidence=confidence,
+                reasoning='; '.join(reasons),
+                weight=self.weights.get('technical', 1.0),
+            )
+        except Exception as e:
+            logger.error(f"[MultiAgent] 技术分析师失败: {e}")
+            return None
+
+    def _analyze_fundamental(self, stock_code: str, history) -> Optional[AgentVote]:
+        """基本面分析师: 基于财务数据"""
+        try:
+            from modules.fundamental_fetcher import FundamentalFetcher
+            fetcher = FundamentalFetcher()
+            data = fetcher.get_financial_data(stock_code)
+
+            if not data:
+                return AgentVote(
+                    role=AgentRole.FUNDAMENTAL.value,
+                    decision=Decision.NEUTRAL.value,
+                    confidence=0.3,
+                    reasoning='无财务数据',
+                    weight=self.weights.get('fundamental', 1.0),
+                )
+
+            score = 0
+            reasons = []
+
+            # ROE 分析
+            roe = data.get('roe', 0)
+            if roe > 15:
+                score += 1
+                reasons.append(f"ROE优秀({roe:.1f}%)")
+            elif roe < 5:
+                score -= 1
+                reasons.append(f"ROE差({roe:.1f}%)")
+
+            # 营收增长
+            revenue_growth = data.get('revenue_growth', 0)
+            if revenue_growth > 20:
+                score += 1
+                reasons.append(f"营收增长{revenue_growth:.0f}%")
+            elif revenue_growth < 0:
+                score -= 1
+                reasons.append(f"营收下滑{revenue_growth:.0f}%")
+
+            # 毛利率
+            gross_margin = data.get('gross_margin', 0)
+            if gross_margin > 50:
+                score += 1
+                reasons.append(f"毛利率高({gross_margin:.1f}%)")
+
+            # 转换为决策
+            if score >= 2:
+                decision = Decision.BUY.value
+                confidence = 0.65
+            elif score <= -1:
+                decision = Decision.SELL.value
+                confidence = 0.6
+            else:
+                decision = Decision.NEUTRAL.value
+                confidence = 0.5
+
+            return AgentVote(
+                role=AgentRole.FUNDAMENTAL.value,
+                decision=decision,
+                confidence=confidence,
+                reasoning='; '.join(reasons),
+                weight=self.weights.get('fundamental', 1.0),
+            )
+        except Exception as e:
+            logger.error(f"[MultiAgent] 基本面分析师失败: {e}")
+            return None
+
+    def _analyze_sentiment(self, stock_code: str, history) -> Optional[AgentVote]:
+        """情绪分析师: 基于新闻/股吧情感"""
+        try:
+            from modules.sentiment_analyzer_v2 import SentimentEngine
+            engine = SentimentEngine()
+            result = engine.analyze(stock_code)
+
+            if not result:
+                return AgentVote(
+                    role=AgentRole.SENTIMENT.value,
+                    decision=Decision.NEUTRAL.value,
+                    confidence=0.2,
+                    reasoning='无情感数据',
+                    weight=self.weights.get('sentiment', 1.0),
+                )
+
+            # 综合新闻+股吧情感
+            news_score = result.get('news_sentiment', {}).get('score', 0)
+            guba_score = result.get('guba_sentiment', {}).get('score', 0)
+            avg_score = (news_score + guba_score) / 2
+
+            if avg_score > 0.3:
+                decision = Decision.BUY.value
+                confidence = min(0.8, 0.5 + abs(avg_score))
+                reasoning = f"情绪积极 (新闻:{news_score:.2f} 股吧:{guba_score:.2f})"
+            elif avg_score < -0.3:
+                decision = Decision.SELL.value
+                confidence = min(0.8, 0.5 + abs(avg_score))
+                reasoning = f"情绪消极 (新闻:{news_score:.2f} 股吧:{guba_score:.2f})"
+            else:
+                decision = Decision.NEUTRAL.value
+                confidence = 0.4
+                reasoning = f"情绪中性 (新闻:{news_score:.2f} 股吧:{guba_score:.2f})"
+
+            return AgentVote(
+                role=AgentRole.SENTIMENT.value,
+                decision=decision,
+                confidence=confidence,
+                reasoning=reasoning,
+                weight=self.weights.get('sentiment', 1.0),
+            )
+        except Exception as e:
+            logger.error(f"[MultiAgent] 情绪分析师失败: {e}")
+            return None
+
+    def _analyze_quant(self, stock_code: str, history) -> Optional[AgentVote]:
+        """量化分析师: 基于多因子模型"""
+        try:
+            from modules.factors.multi_factor_model_v2 import MultiFactorModel
+            model = MultiFactorModel()
+            factors = model.compute_factors(stock_code)
+
+            if not factors or 'composite_score' not in factors:
+                return AgentVote(
+                    role=AgentRole.QUANT.value,
+                    decision=Decision.NEUTRAL.value,
+                    confidence=0.3,
+                    reasoning='因子计算失败',
+                    weight=self.weights.get('quant', 1.2),
+                )
+
+            score = factors['composite_score']
+
+            if score > 0.6:
+                decision = Decision.STRONG_BUY.value
+                confidence = min(0.9, 0.5 + score * 0.5)
+            elif score > 0.2:
+                decision = Decision.BUY.value
+                confidence = 0.6
+            elif score < -0.6:
+                decision = Decision.STRONG_SELL.value
+                confidence = min(0.9, 0.5 + abs(score) * 0.5)
+            elif score < -0.2:
+                decision = Decision.SELL.value
+                confidence = 0.6
+            else:
+                decision = Decision.NEUTRAL.value
+                confidence = 0.5
+
+            return AgentVote(
+                role=AgentRole.QUANT.value,
+                decision=decision,
+                confidence=confidence,
+                reasoning=f"综合因子得分: {score:.3f}",
+                weight=self.weights.get('quant', 1.2),
+            )
+        except Exception as e:
+            logger.error(f"[MultiAgent] 量化分析师失败: {e}")
+            return None
+
+    def _analyze_timeseries(self, stock_code: str, history) -> Optional[AgentVote]:
+        """时序预测师: 基于时序基础模型"""
+        try:
+            # 尝试使用 Moirai
+            from modules.models.moirai_predictor import get_moirai_predictor
+            predictor = get_moirai_predictor()
+            result = predictor.predict(stock_code, prediction_length=5)
+
+            if result:
+                forecast = result.get('forecast', [])
+                if isinstance(forecast, list) and len(forecast) > 0:
+                    # 取最后预测值 vs 当前值
+                    last_price = forecast[-1] if isinstance(forecast[0], (int, float)) else forecast[-1].get('close', 0)
+                    current_price = forecast[0] if isinstance(forecast[0], (int, float)) else forecast[0].get('close', 0)
+                    pct_change = (last_price - current_price) / max(current_price, 1e-8)
+
+                    decision = self._get_decision(pct_change * 100)
+                    confidence = min(0.8, 0.5 + abs(pct_change) * 10)
+
+                    return AgentVote(
+                        role=AgentRole.TIMESERIES.value,
+                        decision=decision,
+                        confidence=confidence,
+                        reasoning=f"时序预测涨跌幅: {pct_change*100:.2f}%",
+                        weight=self.weights.get('timeseries', 1.1),
+                    )
+
+            return AgentVote(
+                role=AgentRole.TIMESERIES.value,
+                decision=Decision.NEUTRAL.value,
+                confidence=0.3,
+                reasoning='时序预测失败',
+                weight=self.weights.get('timeseries', 1.1),
+            )
+        except Exception as e:
+            logger.error(f"[MultiAgent] 时序预测师失败: {e}")
+            return None
+
+    def _analyze_rl(self, stock_code: str, history) -> Optional[AgentVote]:
+        """RL 交易员: 基于强化学习决策"""
+        try:
+            from modules.models.drl_agent import get_drl_agent
+            agent = get_drl_agent()
+            if agent:
+                decision = agent.decide(stock_code)
+                if decision:
+                    action = decision.get('action', 'hold')
+                    confidence = decision.get('confidence', 0.5)
+
+                    action_map = {
+                        'buy': Decision.BUY.value,
+                        'sell': Decision.SELL.value,
+                        'strong_buy': Decision.STRONG_BUY.value,
+                        'strong_sell': Decision.STRONG_SELL.value,
+                        'hold': Decision.NEUTRAL.value,
+                    }
+                    return AgentVote(
+                        role=AgentRole.RL.value,
+                        decision=action_map.get(action, Decision.NEUTRAL.value),
+                        confidence=confidence,
+                        reasoning=f"RL决策: {action}",
+                        weight=self.weights.get('rl', 0.9),
+                    )
+
+            return AgentVote(
+                role=AgentRole.RL.value,
+                decision=Decision.NEUTRAL.value,
+                confidence=0.2,
+                reasoning='DRL不可用',
+                weight=self.weights.get('rl', 0.9),
+            )
+        except Exception as e:
+            logger.error(f"[MultiAgent] RL交易员失败: {e}")
+            return None
+
+    def _compute_consensus(self, stock_code: str, votes: List[AgentVote]) -> ConsensusResult:
+        """
+        计算加权共识
+
+        使用加权投票 + 置信度加权:
+        consensus = sum(weight * confidence * vote_value) / sum(weight * confidence)
+        """
+        if not votes:
+            return ConsensusResult(
+                stock_code=stock_code,
+                consensus=Decision.NEUTRAL.value,
+                confidence=0.0,
+                vote_count={},
+                agent_votes=[],
+                weights=self.weights,
+                conflict=False,
+                conflict_ratio=0.5,
+                timestamp=datetime.now().isoformat(),
+                reasoning='无有效投票',
+            )
+
+        # 决策数值映射
+        decision_values = {
+            Decision.STRONG_BUY.value: 2,
+            Decision.BUY.value: 1,
+            Decision.NEUTRAL.value: 0,
+            Decision.SELL.value: -1,
+            Decision.STRONG_SELL.value: -2,
+        }
+
+        # 加权得分
+        weighted_score = 0.0
+        total_weight = 0.0
+        vote_count = {}
+        agent_votes_data = []
+
+        for vote in votes:
+            val = decision_values.get(vote.decision, 0)
+            weight = vote.weight
+            confidence = vote.confidence
+
+            weighted_score += val * weight * confidence
+            total_weight += weight * confidence
+
+            vote_count[vote.decision] = vote_count.get(vote.decision, 0) + 1
+            agent_votes_data.append(vote.to_dict())
+
+        # 归一化得分
+        if total_weight > 0:
+            normalized_score = weighted_score / total_weight
+        else:
+            normalized_score = 0.0
+
+        # 转换回决策
+        if normalized_score > 0.8:
+            consensus = Decision.STRONG_BUY.value
+        elif normalized_score > 0.3:
+            consensus = Decision.BUY.value
+        elif normalized_score > -0.3:
+            consensus = Decision.NEUTRAL.value
+        elif normalized_score > -0.8:
+            consensus = Decision.SELL.value
+        else:
+            consensus = Decision.STRONG_SELL.value
+
+        # 置信度
+        confidence = min(1.0, abs(normalized_score) + 0.3)
+
+        # 冲突检测: 多空分歧
+        bullish = vote_count.get(Decision.BUY.value, 0) + vote_count.get(Decision.STRONG_BUY.value, 0)
+        bearish = vote_count.get(Decision.SELL.value, 0) + vote_count.get(Decision.STRONG_SELL.value, 0)
+        total_votes = len(votes)
+
+        if bullish > 0 and bearish > 0:
+            conflict_ratio = min(bullish, bearish) / total_votes
+            conflict = conflict_ratio > 0.3
+        else:
+            conflict = False
+            conflict_ratio = 0.0
+
+        # 生成 reasoning
+        reasons = []
+        for vote in votes:
+            reasons.append(f"{vote.role}: {vote.decision} ({vote.confidence:.2f})")
+
+        return ConsensusResult(
+            stock_code=stock_code,
+            consensus=consensus,
+            confidence=confidence,
+            vote_count=vote_count,
+            agent_votes=agent_votes_data,
+            weights=self.weights,
+            conflict=conflict,
+            conflict_ratio=conflict_ratio,
+            timestamp=datetime.now().isoformat(),
+            reasoning='\n'.join(reasons),
+        )
+
+    def update_weights(self, stock_code: str, ic_data: Dict[str, float]):
+        """
+        基于 IC (Information Coefficient) 更新角色权重
+
+        Args:
+            stock_code: 股票代码
+            ic_data: {role: ic_value}
+        """
+        for role, ic in ic_data.items():
+            if role in self.weights:
+                # IC 越高权重越高，范围 [0.5, 2.0]
+                self.weights[role] = max(0.5, min(2.0, 1.0 + ic * 0.5))
+        logger.info(f"[MultiAgent] 更新权重: {self.weights}")
+
+    def get_history(self, limit: int = 10) -> List[Dict]:
+        """获取历史共识结果"""
+        return [h.to_dict() for h in self._history[-limit:]]
+
+    def get_summary(self) -> Dict:
+        """获取引擎摘要"""
+        return {
+            'total_decisions': len(self._history),
+            'current_weights': self.weights,
+            'recent_consensus': self.get_history(limit=5),
+        }
+
+
+# 全局单例
+_consensus_engine: Optional[MultiAgentConsensus] = None
+
+
+def get_consensus_engine() -> MultiAgentConsensus:
+    """获取多智能体共识引擎全局实例"""
+    global _consensus_engine
+    if _consensus_engine is None:
+        _consensus_engine = MultiAgentConsensus()
+    return _consensus_engine

@@ -20,7 +20,9 @@ from flask import Blueprint, request, jsonify
 from typing import Dict, List
 from modules.logger import logger
 import numpy as np
+import threading
 import time
+from datetime import datetime
 
 bp = Blueprint('dashboard', __name__, url_prefix='/api/dashboard')
 
@@ -33,8 +35,8 @@ def _get_stock_code():
 def _get_klines(code, days=60):
     """获取 K 线数据"""
     try:
-        from app import data_fetcher
-        return data_fetcher.get_kline_data(code, period='daily', count=days)
+        from modules.dependencies import get_data_fetcher
+        return get_data_fetcher().get_kline_data(code, period='daily', count=days)
     except Exception as e:
         logger.error(f"[DashboardAPI] K线数据获取失败: {e}")
         return []
@@ -47,19 +49,19 @@ def factors():
     """获取所有因子计算结果"""
     try:
         code = _get_stock_code()
-        from app import analysis_engine, data_fetcher
-        stock_data = data_fetcher.get_stock_info(code)
+        analysis_engine = None; from modules.dependencies import get_analysis_engine, get_data_fetcher
+        stock_data = get_data_fetcher().get_stock_info(code)
         klines = _get_klines(code)
 
         # 多因子模型 V2
-        from modules.multi_factor_model_v2 import multi_factor_model_v2 as mfm
+        from modules.factors.multi_factor_model_v2 import multi_factor_model_v2 as mfm
         factor_scores = mfm.calculate_all_factors_cached(code, stock_data, klines=klines)
         weighted = mfm.weighted_score(factor_scores)
         rating = mfm.get_rating(weighted)
 
         # 增强特征
         try:
-            from modules.enhanced_features import enhanced_features
+            from modules.factors.enhanced_features import enhanced_features
             enhanced = enhanced_features.calculate_all(stock_data, klines=klines)
         except Exception:
             enhanced = {}
@@ -84,9 +86,9 @@ def ml_prediction():
     """获取 ML 预测结果"""
     try:
         code = _get_stock_code()
-        from app import data_fetcher, ml_predictor
-        stock_data = data_fetcher.get_stock_info(code)
-        klines = _get_klines(code)
+        from modules.dependencies import get_data_fetcher, get_ml_predictor
+        stock_data = get_data_fetcher().get_stock_info(code)
+        klines = _get_klines(code, days=300)  # ML 预测需要至少 257 天数据
 
         # 动态集成
         try:
@@ -95,18 +97,17 @@ def ml_prediction():
         except Exception:
             regime = 'sideways'
 
-        # ML 预测 -- 始终加载缓存模型，从不在此处训练
-        # 模型训练由 ModelTrainingScheduler 后台调度（启动时 + 每 24h + API 手动触发）
-        if not ml_predictor.is_trained:
-            ml_predictor.load_latest_model()
+        # ML 预测 -- 不再调用 load_latest_model()（C 扩展内存冲突导致 SIGSEGV）
+        # 模型训练由 ModelTrainingScheduler 后台调度（每天 23:00 + API 手动触发）
+        # 如果模型未训练，返回中性预测
 
-        if ml_predictor.is_trained:
+        if get_ml_predictor().is_trained:
             # 使用 prepare_features() 保证与训练特征一致（修复前视偏差 + 共线性问题）
-            features = ml_predictor.prepare_features(stock_data, klines)
+            features = get_ml_predictor().prepare_features(stock_data, klines)
             if features is None:
                 # 数据不足回退到默认
-                features = ml_predictor._make_default_features()
-            result = ml_predictor.predict_direction(features)
+                features = get_ml_predictor()._make_default_features()
+            result = get_ml_predictor().predict_direction(features, klines=klines)
         else:
             result = {
                 'direction': 'neutral',
@@ -129,9 +130,14 @@ def ml_prediction():
             'prediction': result,
             'regime': regime,
             'model_weights': weights,
-            'is_trained': ml_predictor.is_trained,
-            'cv_score': ml_predictor.cv_score,
-            'feature_importances': ml_predictor.feature_importances,
+            'is_trained': get_ml_predictor().is_trained,
+            'cv_score': get_ml_predictor().cv_score,
+            'models': list(get_ml_predictor().models.keys()),
+            'feature_importances': get_ml_predictor()._flatten_feature_importances(get_ml_predictor().feature_importances),
+            'model_version': 'v1.2.0',
+            'last_retrain': get_ml_predictor()._trained_at or '未训练',
+            'trained_at': get_ml_predictor()._trained_at,
+            'is_fresh': get_ml_predictor().is_model_fresh(),
         })
     except Exception as e:
         logger.error(f"[DashboardAPI] ML 预测失败: {e}")
@@ -144,9 +150,9 @@ def ml_prediction():
 def factor_ic():
     """获取因子 IC/ICIR 历史"""
     try:
-        from modules.factor_ic_monitor import factor_ic_monitor, FactorICMonitor
+        from modules.factors.factor_ic_monitor import factor_ic_monitor
 
-        monitor = FactorICMonitor()
+        monitor = factor_ic_monitor
 
         # 精简股票池 (5 只活跃 A 股, 确保响应 < 30s)
         stock_pool = [
@@ -320,7 +326,7 @@ def factor_ic():
 def risk_report():
     """获取风险报告"""
     try:
-        from modules.barra_risk_model import RiskOptimizer, RiskReportGenerator
+        from modules.factors.barra_risk_model import RiskOptimizer, RiskReportGenerator
         import numpy as np
 
         # 简化: 生成示例报告
@@ -349,7 +355,7 @@ def backtest_result():
     try:
         code = _get_stock_code()
         from modules.advanced_backtester import BacktestEngine, BacktestResult, TransactionCostModel
-        from modules.multi_factor_model_v2 import multi_factor_model_v2 as mfm
+        from modules.factors.multi_factor_model_v2 import multi_factor_model_v2 as mfm
 
         # 1. 获取真实 K 线数据 (120 交易日以支持滚动因子计算)
         klines = _get_klines(code, days=120)
@@ -486,20 +492,17 @@ def sentiment():
     try:
         code = _get_stock_code()
         try:
-            from modules.finbert_sentiment import sentiment_analyzer
+            # 2026-09-10 真链化: 原 5 条硬编码假新闻 (对任何股票显示同一"偏多",
+            # 且 neutral→negative 误判) = 假数据冒充真实情绪, 已全部拆除。
+            # 现走真实抓取该股票新闻+股吧 → 批量情感聚合; 无舆情诚实 no_data。
+            from modules.sentiment_engine import get_sentiment_engine
 
-            # 模拟新闻数据
-            news_list = [
-                {'title': '光库科技业绩预增,机构看好未来增长', 'days_ago': 0, 'source': '新闻'},
-                {'title': 'AI算力需求持续爆发,光通信板块受益', 'days_ago': 1, 'source': '新闻'},
-                {'title': '短期涨幅较大,注意回调风险', 'days_ago': 2, 'source': '股吧'},
-                {'title': '主力净流入超亿元,资金持续加仓', 'days_ago': 0, 'source': '新闻'},
-                {'title': '技术面突破压力位,有望继续上行', 'days_ago': 1, 'source': '股吧'},
-            ]
-
-            result = sentiment_analyzer.analyze_stock_news(news_list)
-        except Exception:
-            result = {'score': 0.3, 'label': 'positive', 'n_news': 5}
+            r = get_sentiment_engine().get_sentiment_score(code)
+            result = {'score': r['score'], 'label': r['label'],
+                      'n_news': r['n_articles'], 'method': r['method']}
+        except Exception as e:
+            logger.error(f"[DashboardAPI] 情感分析失败: {e}")
+            result = {'score': 0, 'label': 'no_data', 'n_news': 0, 'method': 'error'}
 
         return jsonify({
             'code': code,
@@ -516,10 +519,10 @@ def sentiment():
 def model_health():
     """获取模型健康状态"""
     try:
-        from app import ml_predictor
+        from modules.dependencies import get_ml_predictor
         from modules.concept_drift import health_monitor
 
-        report = ml_predictor.get_model_report() if ml_predictor.is_trained else {
+        report = get_ml_predictor().get_model_report() if get_ml_predictor().is_trained else {
             'is_trained': False, 'cv_score': 0, 'models': [],
         }
 
@@ -537,41 +540,139 @@ def model_health():
 
 # ── 超参优化 ──────────────────────────────────────────────
 
+# 模块级单例 — 优化结果跨请求持久 (GET 读最近一次真实调参结果)
+_hyperparam_orchestrator = None
+_hyperparam_tuning = {'status': 'idle', 'started_at': None, 'finished_at': None,
+                     'stock_code': None, 'error': None}
+_hyperparam_tuning_lock = threading.Lock()
+
+
+def _run_hyperparam_tuning(code: str, n_trials: int):
+    """后台调参线程 — 数据准备 → 子进程调参 → 结果回写 (daemon 线程, 不阻塞请求)
+
+    2026-09-08: 主进程 (Flask 线程) 直跑 LGBM/XGB 训练曾触发 SIGSEGV 杀死
+    整个服务, 且同步阻塞 15 分钟不可用 → 数据准备留在本线程 (纯 numpy 安全),
+    模型训练全部进子进程 (optimize_all_isolated, 同 ml_training_worker 模式)。
+    """
+    try:
+        from modules.hyperparam_optimizer import segment_regimes, optimize_all_isolated
+        from modules.dependencies import get_ml_predictor
+
+        klines = _get_klines(code, days=500)
+        if not klines or len(klines) < 320:
+            raise ValueError(f'K线数据不足 ({len(klines or [])} 条, 需 ≥320 条)')
+
+        # 真实市场数据: 3 类方向标签 (扣交易成本 + 波动率自适应阈值) ↔ 12 维时序特征
+        ml = get_ml_predictor()
+        labels = ml.create_labels(klines, horizon=5)
+        features = ml.prepare_features_batch(klines, labels)
+        if features is None or len(features) == 0 or len(labels) == 0:
+            raise ValueError('特征/标签构建失败')
+
+        # features[i] ↔ labels[i] 按时间索引对齐 (labels 尾部裁掉 horizon 天)
+        n_common = min(len(features), len(labels))
+        # per-sample regime 分段 (仅用过去 20 日窗口, 无前视) → 分段调参
+        regimes = segment_regimes(klines[:n_common])
+        tuning = optimize_all_isolated(features[:n_common], labels[:n_common],
+                                       regimes=regimes, n_trials=n_trials)
+        if not tuning:
+            with _hyperparam_tuning_lock:
+                _hyperparam_tuning.update(
+                    status='failed', error='调参子进程失败 (详见 server 日志)',
+                    finished_at=datetime.now().isoformat())
+            return
+
+        orchestrator = _hyperparam_orchestrator
+        if orchestrator is not None:
+            orchestrator._best_params = tuning['best_params']
+            orchestrator._regime_params = tuning.get('regime_params') or {}
+            # 调参结果 → MLPredictor.custom_params (模型工厂 + 子进程 trainer 重训消费)。
+            # 尾部 regime 优先用该段调出的参数, 无则回退全局
+            orchestrator.apply_to_predictor(ml, current_regime=tuning.get('current_regime'))
+
+        with _hyperparam_tuning_lock:
+            _hyperparam_tuning.update(status='completed', error=None,
+                                      finished_at=datetime.now().isoformat())
+        logger.info(f"[DashboardAPI] 超参调参完成: {code} (regime={tuning.get('current_regime')})")
+    except Exception as e:
+        logger.error(f"[DashboardAPI] 超参调参线程失败: {e}")
+        with _hyperparam_tuning_lock:
+            _hyperparam_tuning.update(status='failed', error=str(e),
+                                      finished_at=datetime.now().isoformat())
+
+
 @bp.route('/hyperparams', methods=['GET', 'POST'])
 def hyperparams():
-    """GET: 返回当前最佳参数 | POST: 启动新的优化"""
+    """GET: 调参状态/参数 | POST: 后台启动超参优化 (异步, 立即返回)
+
+    2026-09-08 修复: 旧实现用 np.random.randn(200,12) 纯噪声数据调参 (假训练 —
+    噪声上"最优"参数无迁移价值) 且 GET 恒返回硬编码默认值。改为:
+    ① POST 用真实 K 线构建 特征-标签 对 (create_labels 含成本扣除+自适应阈值)
+    ② 调参在后台线程 + 子进程运行 (主进程直跑 C 扩展曾 SIGSEGV 崩服务)
+    ③ GET 优先返回真实调参结果 (前端面板据此呈现), running 时返回进度
+    """
+    global _hyperparam_orchestrator
     try:
+        from modules.hyperparam_optimizer import HyperParamOrchestrator
+
+        if _hyperparam_orchestrator is None:
+            _hyperparam_orchestrator = HyperParamOrchestrator(n_trials=30)
+        orchestrator = _hyperparam_orchestrator
+
         if request.method == 'POST':
             data = request.get_json() or {}
-            n_trials = data.get('n_trials', 30)
+            n_trials = int(data.get('n_trials', 30))
+            code = _get_stock_code()
 
-            try:
-                from modules.hyperparam_optimizer import HyperParamOrchestrator
-                orchestrator = HyperParamOrchestrator(n_trials=n_trials)
+            with _hyperparam_tuning_lock:
+                # 2026-09-08 僵死守卫: 后台线程若卡死在无超时阻塞点
+                # (socket 读/锁死锁), status 会永远停在 running → 端点永久 409。
+                # 超过 3600s 子进程预算 + 60s 缓冲即视为僵死, 解锁允许重触发。
+                stale = (_hyperparam_tuning['status'] == 'running' and
+                         time.time() - (_hyperparam_tuning['started_at'] or 0.0) > 3660)
+                if _hyperparam_tuning['status'] == 'running' and not stale:
+                    return jsonify({'status': 'running',
+                                    'message': '已有调参任务在运行, 请稍后再试'}), 409
+                _hyperparam_tuning.update(status='running', started_at=time.time(),
+                                          stock_code=code, error=None)
 
-                # 生成模拟特征数据
-                np.random.seed(42)
-                X = np.random.randn(200, 12)
-                y = np.random.choice([-1, 0, 1], size=200)
-
-                best_params = orchestrator.optimize_all(X, y)
-
-                return jsonify({
-                    'status': 'completed',
-                    'n_trials': n_trials,
-                    'best_params': best_params,
-                })
-            except Exception as e:
-                logger.error(f"[DashboardAPI] 超参优化失败: {e}")
-                return jsonify({'status': 'error', 'message': str(e)}), 500
-
-        else:
-            # GET: 返回默认参数
+            threading.Thread(target=_run_hyperparam_tuning,
+                             args=(code, n_trials),
+                             name='HyperparamTuning', daemon=True).start()
             return jsonify({
-                'lgb': {'n_estimators': 200, 'max_depth': 6, 'learning_rate': 0.05},
-                'xgb': {'n_estimators': 200, 'max_depth': 5, 'learning_rate': 0.05},
-                'rf': {'n_estimators': 100, 'max_depth': 5, 'min_samples_split': 5},
+                'status': 'started',
+                'message': '超参调参已在后台启动 (regime 分段调参, 约 25-35 分钟), '
+                           'GET /api/dashboard/hyperparams 可查询进度',
             })
+
+        # GET: running → 进度; 有真实调参结果 → 返回之; 否则默认参数
+        # (保持前端扁平 {lgb,xgb,rf} 结构兼容)
+        with _hyperparam_tuning_lock:
+            status = _hyperparam_tuning['status']
+            elapsed = time.time() - (_hyperparam_tuning['started_at'] or 0.0)
+            if status == 'running' and elapsed > 3660:
+                # 僵死自愈: 线程卡死在无超时阻塞点时不永久占住 running
+                # (子进程侧 subprocess timeout=3600 已会先触发, 此为双保险)
+                _hyperparam_tuning.update(
+                    status='failed', error='调参超时 (>3660s, 疑似僵死, 已自愈解锁)',
+                    finished_at=datetime.now().isoformat())
+                status = 'failed'
+
+        if status == 'running':
+            return jsonify({'status': 'running', 'elapsed_seconds': round(elapsed, 1)})
+
+        best = orchestrator.get_best_params()
+        if not (best and all(v for v in best.values())):
+            # 内存无结果 → 读 02:00 夜间调参快照 (2026-09-08 凌晨链)
+            from modules.hyperparam_optimizer import load_param_snapshot
+            best = load_param_snapshot()
+        if best and all(v for v in best.values()):
+            return jsonify(best)
+        return jsonify({
+            'lgb': {'n_estimators': 200, 'max_depth': 6, 'learning_rate': 0.05},
+            'xgb': {'n_estimators': 200, 'max_depth': 5, 'learning_rate': 0.05},
+            'rf': {'n_estimators': 100, 'max_depth': 5, 'min_samples_split': 5},
+        })
     except Exception as e:
         logger.error(f"[DashboardAPI] 超参优化 API 失败: {e}")
         return jsonify({'error': str(e)}), 500
@@ -584,7 +685,7 @@ def data_quality():
     """获取数据质量评估"""
     try:
         code = _get_stock_code()
-        from app import data_fetcher
+        from modules.dependencies import get_data_fetcher
 
         # 获取 K 线数据
         klines = _get_klines(code, days=500)
@@ -636,8 +737,8 @@ def data_quality():
 
         # 尝试获取基本面数据质量
         try:
-            from app import analysis_engine
-            stock_info = data_fetcher.get_stock_info(code)
+            from modules.dependencies import get_analysis_engine
+            stock_info = get_data_fetcher().get_stock_info(code)
             if stock_info:
                 # Tencent 返回 pe, EastMoney 可能返回 pe_ratio/pb
                 has_financial = bool(stock_info.get('pe') or stock_info.get('pe_ratio') or stock_info.get('pb') or stock_info.get('pb_ratio'))
@@ -828,6 +929,154 @@ def backtest_manual():
         logger.error(f"[DashboardAPI] 手动回测失败: {e}")
         return jsonify({'error': str(e)}), 500
 
+
+# ── 综合因子分析 ──────────────────────────────────────────────
+
+@bp.route('/factors-comprehensive')
+def factors_comprehensive():
+    """综合因子分析 — 基础因子 + Alpha158 + Alpha360 + Barra CNE6"""
+    try:
+        code = _get_stock_code()
+        from modules.dependencies import get_data_fetcher
+        from modules.factors.multi_factor_model_v2 import multi_factor_model_v2 as mfm
+        from modules.factors.alpha360_calculator import alpha360_calculator
+        from modules.factors.barra_cne6_calculator import barra_cne6_calculator
+        from modules.factors.alpha158_calculator import alpha158_calculator
+        import numpy as np
+
+        stock_data = get_data_fetcher().get_stock_info(code)
+        klines = _get_klines(code, days=120)
+
+        result = {'code': code, 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')}
+
+        # 基础因子 (21 因子走 dynamic_cache 内存缓存, 5min TTL 依赖链失效)
+        base_factors = mfm.calculate_all_factors_cached(code, stock_data, klines=klines)
+        result['base_factors'] = {k: round(v, 4) for k, v in base_factors.items()}
+        result['base_factor_count'] = len(base_factors)
+
+        # Alpha360 因子 (P1-5: factor_cache 语义缓存旁路, 默认开 killswitch=FACTOR_SEMANTIC_CACHE=0)
+        alpha360_factors = {}
+        if klines and len(klines) >= 30:
+            alpha360_factors = alpha360_calculator.calculate_all(
+                klines, stock_code=code, use_cache=True)
+            result['alpha360_factors'] = {k: round(v, 4) for k, v in alpha360_factors.items()}
+            result['alpha360_count'] = len(alpha360_factors)
+
+        # Barra CNE6 风格因子
+        barra_factors = barra_cne6_calculator.calculate_all(stock_data, klines)
+        result['barra_factors'] = {k: round(v, 4) for k, v in barra_factors.items()}
+        result['barra_count'] = len(barra_factors)
+
+        # 综合得分
+        all_factors = {**base_factors, **alpha360_factors, **{f'barra_{k}': v for k, v in barra_factors.items()}}
+        weighted = mfm.weighted_score(all_factors)
+        rating = mfm.get_rating(weighted)
+        result['weighted_score'] = round(weighted, 4)
+        result['rating'] = rating
+        result['total_factor_count'] = len(all_factors)
+
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"[DashboardAPI] 综合因子分析失败: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# ── IC 增强分析 ──────────────────────────────────────────────
+
+@bp.route('/factor-ic-enhanced')
+def factor_ic_enhanced():
+    """增强版因子 IC 分析 — Alphalens 风格"""
+    try:
+        from modules.factors.factor_ic_monitor import (
+            factor_ic_monitor, factor_turnover,
+            long_short_analyzer, factor_group_ic, ICQQPlot, ICDecay,
+        )
+        from modules.dependencies import get_data_fetcher
+
+        monitor = factor_ic_monitor
+        # 2026-09-15 修: 原 fetcher = data_fetcher 为未定义名 (死链 NameError 恒 500), 对齐 :940 取数器
+        fetcher = get_data_fetcher()
+        from modules.factors.multi_factor_model_v2 import multi_factor_model_v2 as mfm
+
+        # 股票池
+        stock_pool = [
+            'sh600519', 'sz000858', 'sz300750', 'sh600036', 'sz000333',
+            'sh601318', 'sz002415', 'sh600276', 'sz300124', 'sh601166',
+        ]
+
+        # 收集截面数据
+        factor_cross = {}
+        return_cross = {}
+        for code in stock_pool:
+            try:
+                s_data = fetcher.get_stock_info(code)
+                klines = fetcher.get_kline_data(code, 'daily', 60)
+                if not s_data or not klines:
+                    continue
+
+                # 21 因子走 dynamic_cache 内存缓存 (同数据 5min 内重复刷新免重算)
+                factors = mfm.calculate_all_factors_cached(code, s_data, klines=klines)
+                # 未来收益用当日涨跌幅 proxy
+                future_ret = s_data.get('change_pct', 0) / 100.0
+
+                factor_cross[code] = factors
+                return_cross[code] = future_ret
+            except Exception:
+                continue
+
+        # 截面 IC
+        pearson_ic = monitor.compute_cross_sectional_ic(
+            {'today': factor_cross},
+            {'today': return_cross}
+        )
+        rank_ic = monitor.compute_rank_ic(
+            {'today': factor_cross},
+            {'today': return_cross}
+        )
+
+        # 因子 IC 统计
+        ic_stats = {}
+        for fname, fval in factor_cross.get('today', {}).items():
+            rval = return_cross.get('today', 0)
+            # 单点 IC 无法计算，用历史数据
+            ic_stats[fname] = {'ic_pearson': pearson_ic, 'ic_rank': rank_ic}
+
+        # IC QQ-图数据
+        qq_data = ICQQPlot.compute_qq_data([pearson_ic, rank_ic])
+
+        # 多空分析
+        ls_result = long_short_analyzer.compute_long_short(
+            factor_cross.get('today', {}),
+            return_cross,
+            n_groups=5,
+        )
+
+        # 因子组 IC
+        factor_groups = mfm.FACTOR_CATEGORIES
+        group_ic = factor_group_ic.compute_group_ic(
+            {'today': factor_cross},
+            {'today': return_cross},
+            factor_groups,
+        )
+
+        return jsonify({
+            'success': True,
+            'pearson_ic': round(pearson_ic, 6),
+            'rank_ic': round(rank_ic, 6),
+            'factor_ic_stats': ic_stats,
+            'qq_plot': qq_data,
+            'long_short': ls_result,
+            'group_ic': group_ic,
+            'stock_count': len(factor_cross),
+        })
+    except Exception as e:
+        logger.error(f"[DashboardAPI] IC 增强分析失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
+# ── 单元测试 ──────────────────────────────────────────────
 
 # ── 测试代码 ──────────────────────────────────────────────
 

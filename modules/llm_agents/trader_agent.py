@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
 from modules.logger import logger
-from modules.llm_agents.llm_client import LLMClient, LLMResponse
+from modules.llm_agents.llm_client import LLMClient, LLMResponse, extract_json
 
 
 @dataclass
@@ -104,21 +104,30 @@ MACD: {macd}
             
             response = self.llm.get_response([{"role": "user", "content": prompt}])
             
-            try:
-                data = json.loads(response.content)
-            except:
+            data = extract_json(response.content)
+            if not data:
                 data = {"action": "hold", "quantity_pct": 0, "price_target": "--",
                        "stop_loss": "--", "take_profit": "--", "confidence": 0.5,
                        "reasoning": "LLM 交易决策", "execution_timing": "gradual",
                        "position_size": "medium"}
             
+            # 2026-09-10 契约修复: LLM 常吐"观望区间"等中文区间/空串,
+            # 直 float() 抛 ValueError → 被外层 except 吞成 hold 0.3 (静默噪声)。
+            # safe_float: 不可解析 → 0 (止损止盈无意义) + warning, 不炸链。
+            def _sf(x, default=0.0):
+                try:
+                    v = float(x)
+                    return v if v == v else default  # NaN 守卫
+                except (TypeError, ValueError):
+                    return default
+
             return TradeDecision(
                 action=data.get("action", "hold"),
-                quantity=data.get("quantity_pct", 0),
-                price_target=float(data.get("price_target", 0)) if data.get("price_target") != "--" else 0,
-                stop_loss=float(data.get("stop_loss", 0)) if data.get("stop_loss") != "--" else 0,
-                take_profit=float(data.get("take_profit", 0)) if data.get("take_profit") != "--" else 0,
-                confidence=data.get("confidence", 0.5),
+                quantity=_sf(data.get("quantity_pct", 0)),
+                price_target=_sf(data.get("price_target", 0)),
+                stop_loss=_sf(data.get("stop_loss", 0)),
+                take_profit=_sf(data.get("take_profit", 0)),
+                confidence=_sf(data.get("confidence", 0.5), 0.5),
                 reasoning=data.get("reasoning", response.content)
             )
         except Exception as e:

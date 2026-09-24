@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
 from modules.logger import logger
-from modules.llm_agents.llm_client import LLMClient
+from modules.llm_agents.llm_client import LLMClient, extract_json
 
 
 @dataclass
@@ -29,6 +29,9 @@ class RiskAssessment:
     stop_loss_pct: float
     correlation_risk: str
     liquidity_risk: str
+    # 2026-09-09: 补字段 — agent_coordinator:304 读 risk_assessment.risk_adjustment,
+    # 此前 dataclass 缺该字段 → 正常 LLM 链在构建 AgentDecision 时必抛 AttributeError
+    risk_adjustment: str = "保持"
     timestamp: float = field(default_factory=time.time)
 
 
@@ -96,9 +99,8 @@ class RiskManager:
             
             response = self.llm.get_response([{"role": "user", "content": prompt}])
             
-            try:
-                data = json.loads(response.content)
-            except:
+            data = extract_json(response.content)
+            if not data:
                 data = {"overall_risk": "medium", "max_position_pct": 50,
                        "stop_loss_pct": 5, "correlation_risk": "medium",
                        "liquidity_risk": "medium", "risk_adjustment": "保持",
@@ -109,7 +111,8 @@ class RiskManager:
                 max_position_pct=data.get("max_position_pct", 50),
                 stop_loss_pct=data.get("stop_loss_pct", 5),
                 correlation_risk=data.get("correlation_risk", "medium"),
-                liquidity_risk=data.get("liquidity_risk", "medium")
+                liquidity_risk=data.get("liquidity_risk", "medium"),
+                risk_adjustment=data.get("risk_adjustment", "保持")
             )
         except Exception as e:
             logger.error(f"RiskManager error: {e}")

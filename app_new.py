@@ -36,19 +36,19 @@ from modules.strategy_engine_v2 import StrategyEngineV2, strategy_engine_v2
 from modules.kline_signal_analyzer import KlineSignalAnalyzer
 from modules.atr_calculator import ATRCalculator, ADXCalculator
 from modules.atr_trend_filter import ATR_TrendFilter, atr_trend_filter
-from modules.rsi_multicycle import RSI_MultiCycle, rsi_multicycle
-from modules.volatility_target import VolatilityTarget, volatility_target
-from modules.macd_bollinger import MACD_Bollinger, macd_bollinger
-from modules.sector_rotation import SectorRotation, sector_rotation
-from modules.kelly_optimizer import KellyOptimizer, kelly_optimizer
+from modules.deprecated.rsi_multicycle import RSI_MultiCycle, rsi_multicycle
+from modules.deprecated.volatility_target import VolatilityTarget, volatility_target
+from modules.deprecated.macd_bollinger import MACD_Bollinger, macd_bollinger
+from modules.deprecated.sector_rotation import SectorRotation, sector_rotation
+from modules.deprecated.kelly_optimizer import KellyOptimizer, kelly_optimizer
 from modules.websocket_handler import WebSocketFundFlowHandler
 from modules.heatmap_generator import HeatmapGenerator
 from modules.hmm_market_detector import MarketRegimeDetector
 from modules.factor_orthogonalizer import FactorOrthogonalizer
 from modules.transaction_cost_model import TransactionCostModel
 from modules.alert_engine import AlertEngine
-from modules.backtester import Backtester
-from modules.enhanced_backtester import EnhancedBacktester
+from modules.deprecated.backtester import Backtester
+from modules.deprecated.enhanced_backtester import EnhancedBacktester
 from modules.dynamic_cache import cache
 from modules.logger import logger
 from config import config

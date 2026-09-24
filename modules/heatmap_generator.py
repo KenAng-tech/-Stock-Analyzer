@@ -112,6 +112,10 @@ class HeatmapGenerator:
         
         return heatmap
     
+    def generate_heatmap(self) -> Dict:
+        """生成热力图 (别名，兼容 routes/data_routes 调用)"""
+        return self.generate_industry_heatmap()
+
     def get_heatmap_css(self) -> str:
         """获取热力图CSS样式"""
         return """

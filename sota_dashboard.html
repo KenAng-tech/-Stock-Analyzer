@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- DEPRECATED/SHELL sota_dashboard 空壳 (2026-09-23 review): 0 fetch 0 js 引用 = 数据渲染已迁 index tab3/4. 勿删: static_routes serve 引用本文件 (删=500). 若重启用先核查 sina_push/外部链消费 (教训 8 判据). -->
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -186,6 +187,22 @@
             </div>
         </div>
         
+        <!-- Time-LLM 预测 -->
+        <div class="card">
+            <h3>⏱️ Time-LLM 统一预测</h3>
+            <div id="timeLLMPanel">
+                <div class="loading">加载中...</div>
+            </div>
+        </div>
+
+        <!-- Regime-Switching 预测 -->
+        <div class="card">
+            <h3>🔄 Regime-Switching 多模型</h3>
+            <div id="regimeSwitchingPanel">
+                <div class="loading">加载中...</div>
+            </div>
+        </div>
+
         <!-- 集成决策 -->
         <div class="card full-width">
             <h3>📈 集成决策 (Ensemble)</h3>
@@ -383,7 +400,7 @@
         
         function renderModelStatus(status) {
             if (!status) return '';
-            
+
             let html = '<div style="display: flex; gap: 15px; flex-wrap: wrap;">';
             for (const [key, value] of Object.entries(status)) {
                 const isActive = value === 'initialized';
@@ -396,6 +413,99 @@
             }
             html += '</div>';
             return html;
+        }
+
+        function renderTimeLLM(data) {
+            if (!data) return '<div class="loading">数据不可用</div>';
+
+            const direction = data.direction || 'neutral';
+            const confidence = data.confidence || 0.5;
+            const marketRegime = data.market_regime || 'unknown';
+            const regimeProb = data.regime_probability || 0.5;
+            const modelsUsed = data.models_used || [];
+            const modelPreds = data.model_predictions || {};
+
+            const dirColor = direction === 'bullish' ? '#10b981' : direction === 'bearish' ? '#ef4444' : '#f59e0b';
+
+            return `
+                <div class="stat-row">
+                    <span class="stat-label">预测方向</span>
+                    <span class="stat-value ${getDirectionClass(direction)}">${direction}</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">置信度</span>
+                    <span class="stat-value">${(confidence * 100).toFixed(1)}%</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">市场状态</span>
+                    <span class="stat-value">${marketRegime}</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Regime 概率</span>
+                    <span class="stat-value">${(regimeProb * 100).toFixed(1)}%</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">执行时间</span>
+                    <span class="stat-value">${(data.execution_time_ms || 0).toFixed(0)}ms</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">使用模型</span>
+                    <span class="stat-value">${modelsUsed.length} 个</span>
+                </div>
+                ${modelsUsed.length > 0 ? `
+                <div class="factor-list" style="margin-top: 10px;">
+                    ${modelsUsed.map(m => `<span class="model-badge">${m}</span>`).join('')}
+                </div>
+                ` : ''}
+            `;
+        }
+
+        function renderRegimeSwitching(data) {
+            if (!data) return '<div class="loading">数据不可用</div>';
+
+            const direction = data.direction || 'neutral';
+            const confidence = data.confidence || 0.5;
+            const detectedRegime = data.detected_regime || 'unknown';
+            const regimeConfidence = data.regime_confidence || 0.5;
+            const modelCount = data.model_count || 0;
+            const modelPreds = data.model_predictions || {};
+            const regimeWeights = data.regime_weights || {};
+
+            return `
+                <div class="stat-row">
+                    <span class="stat-label">预测方向</span>
+                    <span class="stat-value ${getDirectionClass(direction)}">${direction}</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">置信度</span>
+                    <span class="stat-value">${(confidence * 100).toFixed(1)}%</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">检测到的 Regime</span>
+                    <span class="stat-value">${detectedRegime}</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Regime 置信度</span>
+                    <span class="stat-value">${(regimeConfidence * 100).toFixed(1)}%</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">模型数量</span>
+                    <span class="stat-value">${modelCount} 个</span>
+                </div>
+                ${Object.keys(modelPreds).length > 0 ? `
+                <div style="margin-top: 10px;">
+                    <h4 style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">模型预测</h4>
+                    <div class="factor-list">
+                        ${Object.entries(modelPreds).map(([model, pred]) => `
+                            <div class="factor-item">
+                                <span class="factor-name">${model}</span>
+                                <span class="factor-value ${getDirectionClass(pred.direction)}">${pred.direction} (${(pred.confidence * 100).toFixed(0)}%)</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+                ` : ''}
+            `;
         }
         
         async function refreshAll() {
@@ -418,6 +528,24 @@
             const rlData = await fetchJSON('/sota/rl');
             const rlEl = document.getElementById('rlExecution');
             if (rlEl && rlData) rlEl.innerHTML = renderRLExecution(rlData);
+
+            // 获取 Time-LLM 预测
+            const timeLLMData = await fetchJSON('/api/time-llm/predict/' + currentStock);
+            const timeLLMEl = document.getElementById('timeLLMPanel');
+            if (timeLLMEl && timeLLMData && timeLLMData.success) {
+                timeLLMEl.innerHTML = renderTimeLLM(timeLLMData.data || timeLLMData);
+            } else if (timeLLMEl) {
+                timeLLMEl.innerHTML = '<div class="loading">Time-LLM 预测不可用</div>';
+            }
+
+            // 获取 Regime-Switching 预测
+            const regimeData = await fetchJSON('/api/regime-switching/predict/' + currentStock);
+            const regimeEl = document.getElementById('regimeSwitchingPanel');
+            if (regimeEl && regimeData && regimeData.success) {
+                regimeEl.innerHTML = renderRegimeSwitching(regimeData.data || regimeData);
+            } else if (regimeEl) {
+                regimeEl.innerHTML = '<div class="loading">Regime-Switching 预测不可用</div>';
+            }
 
             // 获取集成决策
             const ensembleData = await fetchJSON('/sota/ensemble');
@@ -477,14 +605,8 @@
                 });
             }
 
-            const ensembleEl = document.getElementById('ensembleDecision');
-            if (ensembleEl && decision) {
-                ensembleEl.innerHTML = renderEnsemble({
-                    ensemble_score: decision.ensemble_score || 0.5,
-                    ensemble_direction: decision.ensemble_direction || 'neutral',
-                    execution_time_ms: decision.execution_time_ms || 0
-                });
-            }
+            // Time-LLM 和 Regime-Switching 面板通过 refreshAll 更新
+            refreshAll();
 
             btn.disabled = false;
             btn.textContent = '⚡ 运行 SOTA 决策';

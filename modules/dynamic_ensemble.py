@@ -68,6 +68,110 @@ class MarketRegimeDetector:
             # 均线交织 → 震荡
             return 'sideways'
 
+    def detect_regime_hmm(
+        self,
+        klines: List[Dict],
+        n_regimes: int = 3,
+    ) -> Tuple[str, Dict[str, float]]:
+        """
+        使用 HMM 检测市场状态
+
+        特征: 收益率, 波动率, 成交量变化
+        状态: bull / bear / sideways
+
+        Args:
+            klines: K 线数据列表
+            n_regimes: 状态数 (默认 3)
+
+        Returns:
+            (regime, probabilities)
+        """
+        if len(klines) < 60:
+            return 'sideways', {'bull': 0.33, 'bear': 0.33, 'sideways': 0.34}
+
+        closes = np.array([float(k.get('close', 0)) for k in klines if float(k.get('close', 0)) > 0])
+        if len(closes) < 60:
+            return 'sideways', {'bull': 0.33, 'bear': 0.33, 'sideways': 0.34}
+
+        # 提取特征
+        returns = np.diff(np.log(closes))
+        vol = np.convolve(returns ** 2, np.ones(20) / 20, mode='valid')
+        vol = np.sqrt(vol)
+        volume_changes = np.diff(np.log([float(k.get('volume', 1)) for k in klines]))
+
+        # 对齐长度
+        min_len = min(len(returns), len(vol), len(volume_changes))
+        features = np.column_stack([
+            returns[-min_len],
+            vol[-min_len],
+            volume_changes[-min_len],
+        ])
+
+        # 简单 HMM: 用 KMeans 聚类近似 (避免依赖 hmmlearn)
+        try:
+            from sklearn.cluster import KMeans
+            kmeans = KMeans(n_clusters=n_regimes, random_state=42, n_init=10)
+            labels = kmeans.fit_predict(features)
+
+            # 根据聚类中心判断状态
+            cluster_means = {}
+            for label in range(n_regimes):
+                mask = labels == label
+                cluster_means[label] = {
+                    'mean_return': float(np.mean(returns[mask][-20:])),
+                    'mean_vol': float(np.mean(vol[mask][-20:])),
+                }
+
+            # 当前状态
+            current_idx = min_len - 1
+            current_label = labels[current_idx]
+            current_mean = cluster_means[current_label]['mean_return']
+
+            if current_mean > 0.001:
+                regime = 'bull'
+            elif current_mean < -0.001:
+                regime = 'bear'
+            else:
+                regime = 'sideways'
+
+            # 概率分布 (基于距离)
+            probs = self._cluster_probs(current_label, cluster_means, n_regimes)
+
+            return regime, probs
+        except Exception as e:
+            logger.warning(f"[DynamicEnsemble] HMM 检测失败: {e}, 回退到简单检测")
+            return self.detect_regime({}, klines), {'bull': 0.33, 'bear': 0.33, 'sideways': 0.34}
+
+    def _cluster_probs(
+        self,
+        current_label: int,
+        cluster_means: Dict,
+        n_regimes: int,
+    ) -> Dict[str, float]:
+        """计算各状态的概率"""
+        probs = {}
+        returns = [cluster_means[i]['mean_return'] for i in range(n_regimes)]
+        max_r = max(returns)
+        min_r = min(returns)
+
+        if max_r == min_r:
+            return {'bull': 1/3, 'bear': 1/3, 'sideways': 1/3}
+
+        # Softmax
+        exp_vals = [np.exp((r - max_r) / 0.01) for r in returns]
+        total = sum(exp_vals) + 1e-10
+
+        label_to_regime = {0: 'bull', 1: 'bear', 2: 'sideways'}
+        for i, exp_v in enumerate(exp_vals):
+            regime = label_to_regime.get(i, 'sideways')
+            probs[regime] = float(exp_v / total)
+
+        # 补充缺失的 regime
+        for r in ['bull', 'bear', 'sideways']:
+            probs.setdefault(r, 0.0)
+
+        return probs
+
     def detect_weighted(self, codes: List[str],
                         fetcher=None) -> Dict[str, str]:
         """
@@ -159,6 +263,55 @@ class ModelWeightScheduler:
             return float(np.mean(self._recent_ic[model_name]))
         return 0.0
 
+    def get_dynamic_weights(self, regime: str,
+                            recent_ic: Optional[Dict[str, float]] = None) -> Dict[str, float]:
+        """
+        根据市场状态和近期 IC 动态计算模型权重
+
+        综合策略:
+        - 基础权重: 基于市场状态 (bull/bear/sideways/volatile)
+        - 动态调整: 基于近期 IC (IC 高的模型获得更多权重)
+        - 平滑过渡: 与当前权重加权平均
+        """
+        # 1. 基础权重 (基于市场状态)
+        base_weights = self.STATE_WEIGHTS.get(regime, self.STATE_WEIGHTS['sideways']).copy()
+
+        # 2. IC 权重 (基于近期 IC)
+        ic_weights = {}
+        if recent_ic:
+            abs_ics = {k: abs(v) for k, v in recent_ic.items()}
+            total = sum(abs_ics.values())
+            if total > 0:
+                ic_weights = {k: v / total for k, v in abs_ics.items()}
+
+        # 3. 合并权重 (70% 基础 + 30% IC)
+        merged = {}
+        all_keys = set(base_weights.keys()) | set(ic_weights.keys())
+        for key in all_keys:
+            merged[key] = 0.7 * base_weights.get(key, 0) + 0.3 * ic_weights.get(key, 0)
+
+        # 4. 平滑过渡 (如果已有当前权重)
+        if self._current_weights:
+            merged = self.smooth_transition(self._current_weights, merged, alpha=0.4)
+
+        # 5. 归一化
+        total = sum(merged.values())
+        if total > 0:
+            merged = {k: round(v / total, 4) for k, v in merged.items()}
+
+        # 6. 更新当前权重
+        self._current_weights = merged
+
+        return merged
+
+    def get_status(self) -> Dict:
+        """获取调度器状态"""
+        return {
+            'current_weights': self._current_weights or {},
+            'recent_ic': {k: round(float(np.mean(v)), 4) for k, v in self._recent_ic.items()},
+            'regime_weights': self.STATE_WEIGHTS,
+        }
+
 
 class DynamicEnsemblePredictor:
     """动态集成预测器"""
@@ -181,11 +334,15 @@ class DynamicEnsemblePredictor:
         3. 加权融合各模型概率
         4. 返回最终预测
         """
-        # Step 1: 检测市场状态
-        regime = self.regime_detector.detect_regime(stock_data, klines)
+        # Step 1: 优先使用 HMM 检测市场状态
+        try:
+            regime, probs = self.regime_detector.detect_regime_hmm(klines)
+        except Exception:
+            regime = self.regime_detector.detect_regime(stock_data, klines)
+            probs = {'bull': 0.33, 'bear': 0.33, 'sideways': 0.34}
 
-        # Step 2: 获取权重
-        weights = self.weight_scheduler.get_weights(regime)
+        # Step 2: 获取动态权重 (综合状态 + IC)
+        weights = self.weight_scheduler.get_dynamic_weights(regime)
 
         # Step 3: 获取各模型预测
         model_probs = self._get_model_predictions(features)
@@ -196,16 +353,17 @@ class DynamicEnsemblePredictor:
                 'confidence': 0.5,
                 'probabilities': {'up': 0.33, 'down': 0.33, 'neutral': 0.34},
                 'regime': regime,
+                'regime_probs': probs,
                 'weights': weights,
             }
 
         # Step 4: 加权融合
         fused_probs = {'up': 0, 'down': 0, 'neutral': 0}
-        for model_name, probs in model_probs.items():
+        for model_name, model_probs_inner in model_probs.items():
             w = weights.get(model_name, 0)
-            fused_probs['up'] += w * probs.get('up', 0.33)
-            fused_probs['down'] += w * probs.get('down', 0.33)
-            fused_probs['neutral'] += w * probs.get('neutral', 0.34)
+            fused_probs['up'] += w * model_probs_inner.get('up', 0.33)
+            fused_probs['down'] += w * model_probs_inner.get('down', 0.33)
+            fused_probs['neutral'] += w * model_probs_inner.get('neutral', 0.34)
 
         # 归一化
         total = sum(fused_probs.values())
@@ -221,6 +379,7 @@ class DynamicEnsemblePredictor:
             'confidence': round(max(fused_probs.values()), 4),
             'probabilities': fused_probs,
             'regime': regime,
+            'regime_probs': probs,
             'weights': weights,
             'model_details': {n: dict(v) for n, v in model_probs.items()},
         }

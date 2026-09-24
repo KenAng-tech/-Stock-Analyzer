@@ -21,7 +21,7 @@ from modules.volatility_target import VolatilityTarget, volatility_target
 from modules.macd_bollinger import MACD_Bollinger, macd_bollinger
 from modules.sector_rotation import SectorRotation, sector_rotation
 from modules.hmm_market_detector import MarketRegimeDetector
-from modules.factor_orthogonalizer import FactorOrthogonalizer
+from modules.factors.factor_orthogonalizer import FactorOrthogonalizer
 from modules.transaction_cost_model import TransactionCostModel
 from config import config
 
@@ -343,7 +343,7 @@ class StrategyEngineV2:
         try:
             entry_dt = datetime.strptime(entry_date, '%Y-%m-%d')
             days_held = (datetime.now() - entry_dt).days
-        except:
+        except Exception:
             days_held = 0
         
         max_hold = self.time_stop_config['max_hold_days']

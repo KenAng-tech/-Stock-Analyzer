@@ -15,12 +15,16 @@
     Event → EventQueue → Engine → Strategy → Order → Execution → Position → Risk → Report
 """
 
+import logging
+
 import numpy as np
 from typing import Dict, List, Optional, Callable
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from enum import Enum
 import json
+
+logger = logging.getLogger('stock_analyzer.event_backtester')
 
 
 class EventType(Enum):
@@ -196,11 +200,18 @@ class ExecutionEngine:
     def __init__(self, commission_rate: float = 0.0003,
                  stamp_tax: float = 0.001,
                  slippage_bps: float = 2.0,
-                 impact_model: str = 'linear'):
+                 impact_model: str = 'linear',
+                 tradability_mode: str = 'observe'):
         self.commission_rate = commission_rate
         self.stamp_tax = stamp_tax
         self.slippage_bps = slippage_bps
-        self.impact_model = impact_model  # linear / square_root
+        self.impact_model = impact_model  # linear / square_root / quadratic
+        # P0-2 (2026-09-15): 涨跌停/停牌可成交性 — 'observe' 只计数不改成交
+        # (现有回测结果零变化), 'enforce' 整单拒绝 (qlib exchange 语义)
+        self.tradability_mode = tradability_mode
+        self.reject_stats = {'observe_would_reject': 0, 'enforce_rejected': 0,
+                             'skipped_no_price': 0}
+        self._last_close: Dict[str, float] = {}
 
     def execute_order(self, order: Order, market_data: Dict) -> Optional[Order]:
         """执行订单，返回成交后的订单"""
@@ -208,6 +219,33 @@ class ExecutionEngine:
         high = market_data.get('high', 0)
         low = market_data.get('low', 0)
         close = market_data.get('close', 0)
+
+        # P0-2: 可成交性检查 (阈值用 modules.tradability 板块自适应;
+        # prev_close 缺失退执行器记忆的上一根收盘, 再缺失则跳过并计数)
+        try:
+            prev = market_data.get('prev_close') or self._last_close.get(order.stock_code)
+            if prev and prev > 0 and close > 0:
+                from modules.tradability import is_tradable
+                pct = (close - prev) / prev
+                direction = 'buy' if order.side == Side.BUY else 'sell'
+                ok, reason = is_tradable(order.stock_code, pct, direction,
+                                         volume=market_data.get('volume'))
+                if not ok:
+                    if self.tradability_mode == 'enforce':
+                        order.status = OrderStatus.REJECTED
+                        order.reason = f'rejected:{reason}'
+                        self.reject_stats['enforce_rejected'] += 1
+                        return order
+                    self.reject_stats['observe_would_reject'] += 1
+                    logger.warning(
+                        f"[Backtest] 涨跌停/停牌观察: {order.stock_code} {direction} "
+                        f"{reason} (observe 模式照常成交)")
+            else:
+                self.reject_stats['skipped_no_price'] += 1
+            if close > 0:
+                self._last_close[order.stock_code] = close
+        except Exception as e:
+            logger.error(f"[Backtest] 可成交性检查异常 (放行): {e}", exc_info=True)
 
         if order.order_type == OrderType.MARKET:
             # 市价单: 用下一根K线开盘价 + 滑点
@@ -266,6 +304,9 @@ class ExecutionEngine:
         order_ratio = order.quantity / volume
         if self.impact_model == 'linear':
             return order_ratio * 0.5  # 订单量占成交量 50% -> 0.5% 冲击
+        elif self.impact_model == 'quadratic':
+            # qlib exchange 二次冲击: 参与率平方 × coef, 10% 参与 → 0.5% 冲击
+            return order_ratio ** 2 * 0.5
         else:  # square_root
             return np.sqrt(order_ratio) * 0.5
 
@@ -595,3 +636,53 @@ class EventDrivenBacktester:
             'equity_curve': self.report.equity_curve[-100:],  # 最近 100 个点
             'timestamp': datetime.now().isoformat(),
         }
+
+    # ── P0-4: 涨跌停限制 ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def is_limit_up(close: float, prev_close: float, is_gem: bool = False) -> bool:
+        """
+        检查是否涨停
+
+        Args:
+            close: 当日收盘价
+            prev_close: 前一日收盘价
+            is_gem: 是否为创业板/科创板 (20% 涨跌停)
+        """
+        limit = 0.20 if is_gem else 0.10
+        return (close / prev_close - 1) >= (limit - 1e-9)  # 浮点精度容差
+
+    @staticmethod
+    def is_limit_down(close: float, prev_close: float, is_gem: bool = False) -> bool:
+        """
+        检查是否跌停
+
+        Args:
+            close: 当日收盘价
+            prev_close: 前一日收盘价
+            is_gem: 是否为创业板/科创板 (20% 涨跌停)
+        """
+        limit = 0.20 if is_gem else 0.10
+        return (prev_close / close - 1) >= (limit - 1e-9)  # 浮点精度容差
+
+    def should_reject_trade(self, order: Order, prev_close: float, is_gem: bool = False) -> bool:
+        """
+        检查交易是否应因涨跌停而被拒绝
+
+        Args:
+            order: 订单
+            prev_close: 前一日收盘价
+            is_gem: 是否为创业板/科创板
+        """
+        is_limit = EventDrivenBacktester.is_limit_up(order.price, prev_close, is_gem)
+        is_limit_down = EventDrivenBacktester.is_limit_down(order.price, prev_close, is_gem)
+
+        if order.side == Side.BUY and is_limit:
+            order.reason = 'rejected:limit_up'
+            order.status = OrderStatus.REJECTED
+            return True
+        elif order.side == Side.SELL and is_limit_down:
+            order.reason = 'rejected:limit_down'
+            order.status = OrderStatus.REJECTED
+            return True
+        return False

@@ -1,20 +1,33 @@
 {
   "server": {
-    "host": "0.0.0.0",
+    "host": "127.0.0.1",
     "port": 5002,
     "debug": false,
-    "threaded": true
+    "threaded": true,
+    "api_key": ""
   },
   "cache": {
-    "realtime": 10,
+    "realtime": 30,
     "technical": 60,
     "fundamental": 300,
     "industry": 600,
     "kline": 300,
     "strategy": 120
   },
+  "datasources": {
+    "tencent": {
+      "enabled": true,
+      "timeout": 10,
+      "retry_count": 3
+    },
+    "eastmoney": {
+      "enabled": true,
+      "timeout": 10,
+      "retry_count": 3
+    }
+  },
   "strategy": {
-    "max_position": 100,
+    "max_position": 200,
     "min_stop_loss": 5,
     "max_stop_loss": 20,
     "take_profit_ratio": 2,
@@ -53,5 +66,6 @@
     "interval": 60,
     "max_iterations": 0,
     "alert_interval": 30
-  }
+  },
+  "rsi_period": 14
 }

@@ -335,6 +335,10 @@ class AlertEngine:
             return [a for a in self._alert_history if a.get('stock_code') == stock_code][-limit:]
         return list(self._alert_history)[-limit:]
 
+    def get_alerts(self, stock_code: str = None, limit: int = 20) -> List[Dict]:
+        """get_recent_alerts 别名 — 兼容 data_routes.py 路由调用 (2026-08-15 修复 500)"""
+        return self.get_recent_alerts(stock_code, limit)
+
     def get_alert_summary(self, stock_code: str = None) -> Dict:
         """获取告警统计摘要（优先从 SQLite 读取）"""
         if self._storage:
@@ -389,8 +393,8 @@ class AlertEngine:
                     else:
                         # 从 WebSocket handler 获取有订阅者的股票
                         try:
-                            from app import websocket_handler
-                            codes = websocket_handler.get_subscribed_stocks()
+                            from modules.dependencies import get_websocket_handler
+                            codes = get_websocket_handler().get_subscribed_stocks()
                         except Exception:
                             codes = []
 
@@ -426,9 +430,9 @@ class AlertEngine:
             # 通过 WebSocket 推送实时告警
             if alerts:
                 try:
-                    from app import socketio
+                    from modules.dependencies import get_socketio
                     for alert in alerts:
-                        socketio.emit('new_alert', {
+                        get_socketio().emit('new_alert', {
                             'stock_code': stock_code,
                             'alerts': alerts,
                             'timestamp': alert['timestamp'],

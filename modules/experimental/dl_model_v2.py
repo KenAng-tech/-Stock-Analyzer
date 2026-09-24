@@ -38,7 +38,7 @@ from modules.logger import logger
 # ── 优先使用 PatchTST (PyTorch) ──────────────────────────────
 
 try:
-    from modules.patchtst_model import (
+    from modules.models.patchtst_model import (
         PatchTST,
         PatchTSTTrainer,
         DeepLearningEnsemble as _PatchTSTEnsemble,

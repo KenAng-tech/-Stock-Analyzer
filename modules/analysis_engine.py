@@ -11,13 +11,104 @@ Performs deep analysis including:
 import math
 import threading
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
 from modules.dynamic_cache import cache
 from modules.logger import logger
 from modules.fundamental_fetcher import FundamentalFetcher
 from modules.ml_predictor import MLPredictor, ml_predictor
+from modules.technical_indicators import comprehensive_technical_analysis
+
+# Time-LLM 统一预测器 (P0: 集成到主分析流程)
+try:
+    from modules.models.time_llm import get_time_llm, TimeLLM
+    HAS_TIME_LLM = True
+except ImportError:
+    HAS_TIME_LLM = False
+    logger.warning("[AnalysisEngine] Time-LLM 不可用")
+
+# Regime-Switching 多模型预测器 (P0: 集成到主分析流程)
+try:
+    from modules.regime_switching import get_regime_switching, RegimeSwitchingPredictor
+    HAS_REGIME_SWITCHING = True
+except ImportError:
+    HAS_REGIME_SWITCHING = False
+    logger.warning("[AnalysisEngine] Regime-Switching 不可用")
+
+# ── SOTA 模型导入 (可选，失败时自动降级) ─────────────────────
+HAS_PATCHTST = False
+HAS_MAMBA = False
+HAS_DIFFUSION = False
+HAS_DRL = False
+HAS_CONFORMAL = False
+HAS_ALPHA158 = False
+HAS_GNN = False
+HAS_CROSS_MARKET = False
+HAS_SENTIMENT = False
+
+try:
+    from modules.models.patchtst_integrator import PatchTSTIntegrator
+    HAS_PATCHTST = True
+    logger.info("[AnalysisEngine] PatchTST 可用")
+except ImportError:
+    logger.debug("[AnalysisEngine] PatchTST 不可用")
+
+try:
+    from modules.models.hft_mamba import MambaHFTPredictor
+    HAS_MAMBA = True
+    logger.info("[AnalysisEngine] Mamba HFT 可用")
+except ImportError:
+    logger.debug("[AnalysisEngine] Mamba HFT 不可用")
+
+try:
+    from modules.models.diffusion_model import DiffusionPredictor
+    HAS_DIFFUSION = True
+    logger.info("[AnalysisEngine] Diffusion 可用")
+except ImportError:
+    logger.debug("[AnalysisEngine] Diffusion 不可用")
+
+try:
+    from modules.models.drl_agent import DRLTradingAgent
+    HAS_DRL = True
+    logger.info("[AnalysisEngine] DRL 可用")
+except ImportError:
+    logger.debug("[AnalysisEngine] DRL 不可用")
+
+try:
+    from modules.models.conformal_predictor import ConformalPredictor
+    HAS_CONFORMAL = True
+    logger.info("[AnalysisEngine] Conformal Prediction 可用")
+except ImportError:
+    logger.debug("[AnalysisEngine] Conformal Prediction 不可用")
+
+try:
+    from modules.factors.alpha158_calculator import Alpha158Calculator
+    HAS_ALPHA158 = True
+    logger.info("[AnalysisEngine] Alpha158 可用")
+except ImportError:
+    logger.debug("[AnalysisEngine] Alpha158 不可用")
+
+try:
+    from modules.models.gnn_predictor import GNNPredictor
+    HAS_GNN = True
+    logger.info("[AnalysisEngine] GNN 可用")
+except ImportError:
+    logger.debug("[AnalysisEngine] GNN 不可用")
+
+try:
+    from modules.cross_market import CrossMarketAnalyzer
+    HAS_CROSS_MARKET = True
+    logger.info("[AnalysisEngine] Cross-Market 可用")
+except ImportError:
+    logger.debug("[AnalysisEngine] Cross-Market 不可用")
+
+try:
+    from modules.sentiment_engine import SentimentEngine
+    HAS_SENTIMENT = True
+    logger.info("[AnalysisEngine] Sentiment 可用")
+except ImportError:
+    logger.debug("[AnalysisEngine] Sentiment 不可用")
 
 
 class AnalysisEngine:
@@ -27,11 +118,14 @@ class AnalysisEngine:
         from .fund_flow_optimizer import FundFlowOptimizer
         self.fund_flow_optimizer = FundFlowOptimizer()
 
-        # 概念漂移检测器 (P0: 集成到主流程)
-        from modules.concept_drift_detector import ConceptDriftDetector
-        self.drift_detector = ConceptDriftDetector()
-        self._last_prediction = None  # 用于漂移检测
-        self._last_actual = None
+        # 概念漂移检测器 (P0: 集成到主流程; 2026-09-08 断链修复)
+        # 旧断链: 私有 ConceptDriftDetector 与全局 drift_monitor (app.py:268,
+        # sota_status_routes 读它) 互不相通 → 面板恒显"无漂移"。统一用全局
+        # DriftMonitor 单例: 喂源 (分析主流程) / 展示 (/api/sota/drift/status) /
+        # 消费 (scheduler.should_retrain) 三端共享同一实例
+        from modules.drift_monitor import get_drift_monitor
+        self.drift_detector = get_drift_monitor()
+        self._pending_drift_pair = None  # (date, up_prob) 跨时配对队列
 
         self.industry_profiles = {
             '光通信': {
@@ -96,6 +190,11 @@ class AnalysisEngine:
             '_fallback': is_fallback,
         }
 
+        # 计算标准 PE（Price / AKShare EPS），用于验证腾讯动态 PE 的准确性
+        price = stock_data.get('price', 0)
+        eps = fund_data.get('eps', 0)
+        pe_standard = round(price / eps, 2) if eps and eps > 0 and price > 0 else 0
+
         return {
             'company_info': {
                 'name': stock_data.get('name', ''),
@@ -104,12 +203,15 @@ class AnalysisEngine:
             },
             'valuation': {
                 'pe': pe,
-                'level': valuation_info['level'],
-                'pe_ratio_to_industry': valuation_info['pe_ratio'],
+                'pe_source': 'stock_data_pe',  # 2026-09-19: 主链 hithink/副链腾讯均可能无 PE, 不猜来源
+                'pe_standard': pe_standard,  # 标准 PE = Price / AKShare 年度 EPS
+                'eps': eps,  # AKShare 年度 EPS
+                'level': valuation_info.get('level', ''),
+                'pe_ratio_to_industry': valuation_info.get('pe_ratio', 0),
                 'market_cap': market_cap,
                 'circulating_cap': circulating_cap,
                 'free_float_ratio': (circulating_cap / market_cap * 100) if market_cap > 0 else 0,
-                'valuation_description': valuation_info['description'],
+                'valuation_description': valuation_info.get('description', ''),
             },
             'financial_health': financial_health,
             'industry_profile': self.industry_profiles.get(industry, {}),
@@ -174,19 +276,63 @@ class AnalysisEngine:
             (ma120, 'MA120')
         ]
         
-        # Technical indicators estimation
-        macd_signal = '即将死叉' if change_pct < -5 else '金叉' if change_pct > 5 else '粘合'
-        kdj_signal = '超卖区' if change_pct < -8 else '超买区' if change_pct > 8 else '中性'
-        rsi_value = 55 + (change_pct * 2)
-        bollinger_position = '中轨附近'
-        
-        if change_pct < -5:
-            short_term_trend = '调整'
-        elif change_pct > 5:
-            short_term_trend = '上涨'
+        # P0 修复 (2026-07-01): 使用真实技术指标计算，替代虚假估算
+        # 如果 K 线数据充足，使用 comprehensive_technical_analysis
+        if klines and len(klines) >= 15:
+            tech_result = comprehensive_technical_analysis(klines)
+            if 'error' not in tech_result:
+                indicators = {
+                    'rsi': {
+                        'value': tech_result['rsi']['value'],
+                        'signal': tech_result['rsi']['signal'],
+                    },
+                    'macd': {
+                        'macd': tech_result['macd']['macd'],
+                        'signal_line': tech_result['macd']['signal'],
+                        'histogram': tech_result['macd']['histogram'],
+                        'signal_type': tech_result['macd']['signal_type'],
+                        'divergence': tech_result['macd'].get('divergence', '无'),
+                    },
+                    'kdj': {
+                        'k': tech_result['kdj']['k'],
+                        'd': tech_result['kdj']['d'],
+                        'j': tech_result['kdj']['j'],
+                        'signal': tech_result['kdj']['signal'],
+                    },
+                    'bollinger': {
+                        'upper': tech_result['bollinger']['upper'],
+                        'middle': tech_result['bollinger']['middle'],
+                        'lower': tech_result['bollinger']['lower'],
+                        'width': tech_result['bollinger']['width'],
+                        'position': tech_result['bollinger']['position'],
+                    },
+                    'atr': tech_result.get('atr', 0),
+                }
+                short_term_trend = tech_result['summary']['overall_trend'] if 'summary' in tech_result else '震荡'
+                medium_term = '偏多' if tech_result['summary']['bullish_signals'] > tech_result['summary']['bearish_signals'] else '偏空' if tech_result['summary']['bearish_signals'] > tech_result['summary']['bullish_signals'] else '震荡'
+            else:
+                # K 线数据不足 15 根，fallback 到简单估算
+                indicators = {
+                    'rsi': {'value': round(55 + change_pct * 2, 1), 'signal': '中性'},
+                    'macd': {'signal_type': '粘合', 'divergence': '无'},
+                    'kdj': {'signal': '中性'},
+                    'bollinger': {'position': '中轨附近'},
+                    'atr': 0,
+                }
+                short_term_trend = '调整' if change_pct < -3 else '上涨' if change_pct > 3 else '震荡'
+                medium_term = '震荡'
         else:
-            short_term_trend = '震荡'
-        
+            # 无 K 线数据，fallback 到简单估算
+            indicators = {
+                'rsi': {'value': round(55 + change_pct * 2, 1), 'signal': '中性'},
+                'macd': {'signal_type': '粘合', 'divergence': '无'},
+                'kdj': {'signal': '中性'},
+                'bollinger': {'position': '中轨附近'},
+                'atr': 0,
+            }
+            short_term_trend = '调整' if change_pct < -3 else '上涨' if change_pct > 3 else '震荡'
+            medium_term = '震荡'
+
         return {
             'kline': {
                 'pattern': kline_pattern,
@@ -204,15 +350,10 @@ class AnalysisEngine:
                 'supports': [{'price': float(s[0]), 'level': s[1]} for s in support_levels],
                 'resistances': [{'price': float(r[0]), 'level': r[1]} for r in resistance_levels],
             },
-            'indicators': {
-                'macd': macd_signal,
-                'kdj': kdj_signal,
-                'rsi': round(rsi_value, 1),
-                'bollinger': bollinger_position
-            },
+            'indicators': indicators,
             'trend': {
                 'short_term': short_term_trend,
-                'medium_term': '震荡'
+                'medium_term': medium_term
             }
         }
     
@@ -280,40 +421,55 @@ class AnalysisEngine:
         kline_stats = stock_data.get('kline_stats', {})
         std_dev = kline_stats.get('std_dev', 0)
 
-        # 获取 K 线数据
-        from modules.data_fetcher import StockDataFetcher
-        fetcher = StockDataFetcher()
+        # 获取 K 线数据 — 优先使用路由层预取的数据（避免重复网络调用）
         stock_code = stock_data.get('code', '')
-        klines = fetcher.get_kline_data(stock_code, 'daily', 100) if stock_code else None
+        _klines = stock_data.get('_klines_daily')  # 路由层预注入
+        if _klines:
+            klines = _klines
+        elif stock_code:
+            from modules.data_fetcher import StockDataFetcher
+            fetcher = StockDataFetcher()
+            klines = fetcher.get_kline_data(stock_code, 'daily', 100)
+        else:
+            klines = None
 
         # ── 使用 MLPredictor 获取 ML 预测 (Stacking Ensemble) ─────────────────────
+        # 注意：不在 analyze 请求中触发训练（太慢会导致请求超时）
+        # 模型训练由 ModelTrainingScheduler 后台调度（每天 23:00 + API 手动触发）
         ml_pred = {'direction': 'neutral', 'confidence': 0.5, 'probabilities': {'up': 0.33, 'down': 0.33, 'neutral': 0.34}}
         ml_trained = False
         try:
-            # 先尝试加载已缓存的模型，避免重复训练
-            if not ml_predictor.is_trained:
-                ml_predictor.load_latest_model()
-
             features = ml_predictor.prepare_features(stock_data, klines) if klines else None
-            if features is not None and klines and len(klines) >= 60:
-                # 模型未训练时，训练一次并持久化
-                if not ml_predictor.is_trained:
-                    labels = ml_predictor.create_labels(klines, horizon=5)
-                    full_features = ml_predictor.prepare_features_batch(klines, labels)
-                    if full_features is not None and len(full_features) >= 100:
-                        dates = [klines[i].get('date', f'day_{i}') for i in range(len(klines))]
-                        if hasattr(ml_predictor, 'train_stacking_ensemble'):
-                            ml_predictor.train_stacking_ensemble(full_features, labels, dates=dates)
-                        else:
-                            ml_predictor.train_simple_model(full_features, labels)
-                        if ml_predictor.is_trained:
-                            ml_predictor.save_model()
-                ml_trained = ml_predictor.is_trained
+            if features is not None and ml_predictor.is_trained:
+                ml_trained = True
                 ml_pred = ml_predictor.predict_direction_cached(stock_code, features)
             elif features is not None:
-                logger.debug(f"[AnalysisEngine] K 线数据不足 ({len(klines) if klines else 0} < 60)，跳过 ML")
+                logger.debug("[AnalysisEngine] ML 模型未训练，返回中性预测")
         except Exception as e:
             logger.warning(f"[AnalysisEngine] ML 预测失败: {e}")
+
+        # ── Time-LLM 统一预测 — 已禁用（LLM 调用 35s+ 导致超时 + C 扩展 SIGSEGV） ──
+        # 该模块在 HTTP 请求上下文中不可靠，改为后台定时推理
+        time_llm_pred = None
+        time_llm_regime = None
+        time_llm_regime_weights = None
+        time_llm_models_used = []
+        # if HAS_TIME_LLM and klines and len(klines) >= 60:
+        #     try:
+        #         ... 原 TimeLLM 推理代码（35s+ 耗时，可能触发 SIGSEGV）
+        #     except Exception as e:
+        #         logger.warning(f"[AnalysisEngine] Time-LLM 预测失败: {e}")
+
+        # ── Regime-Switching 多模型预测 ─────────────────────
+        regime_pred = None
+        regime_detected = None
+        regime_weights = None
+        # ── Regime-Switching — 已禁用（rs.predict() 触发 MPS SIGSEGV） ──
+        # if HAS_REGIME_SWITCHING and klines and len(klines) >= 60:
+        #     try:
+        #         ... 原 Regime-Switching 推理代码（触发 MPS SIGSEGV）
+        #     except Exception as e:
+        #         logger.warning(f"[AnalysisEngine] Regime-Switching 预测失败: {e}")
 
         # ── 基于 ML 概率和波动率的目标价 ─────────────────────
         if std_dev > 0 and price > 0:
@@ -358,7 +514,7 @@ class AnalysisEngine:
 
         # 因子评分（使用 V2 多因子模型，带缓存）
         try:
-            from modules.multi_factor_model_v2 import multi_factor_model_v2
+            from modules.factors.multi_factor_model_v2 import multi_factor_model_v2
             all_factors = multi_factor_model_v2.calculate_all_factors_cached(
                 stock_code, stock_data, klines
             )
@@ -416,32 +572,429 @@ class AnalysisEngine:
             except Exception:
                 pass
 
-        # ── 概念漂移检测 (P0: 集成到主流程) ─────────────────────
+        # ── 概念漂移检测 (P0: 集成到主流程; 2026-09-08 配对修复) ─────────────────────
+        # 旧断链: _last_prediction 每次请求被覆盖 + _last_actual 仅首次计算 →
+        # 第二次起永远在比较"新预测 vs 旧 actual"(时间错位, 误差对失真)。
+        # 修复: 跨时配对 — 本次分析把 (最后 K 线日期, up_prob) 记为 pending,
+        # 下次分析 (若出现更新 K 线) 把 pending 预测 vs 预测日次日实际收益喂给
+        # 全局 drift_monitor (Brier 语义: up 概率 vs 是否真涨)
         drift_status = {}
         try:
-            # 记录预测值，用于下次与实际值比较
-            predicted_return = ml_up_prob - ml_down_prob  # 预测收益偏差
-            self._last_prediction = predicted_return
+            # ① 喂源: 上一对 pending 配对 vs 预测日次日实际收益 (跨时, 无前视)
+            if self._pending_drift_pair is not None and klines and len(klines) >= 2:
+                pend_date, pend_up_prob = self._pending_drift_pair
+                bars = [(k.get('date', ''), float(k.get('close', 0))) for k in klines]
+                bars = [(d, c) for d, c in bars if d and c > 0]
+                dates = [d for d, _ in bars]
+                if pend_date in dates:
+                    i = dates.index(pend_date)
+                    if i + 1 < len(bars):  # 预测日之后至少出现一根新 K 线
+                        next_ret = (bars[i + 1][1] - bars[i][1]) / bars[i][1]
+                        self.drift_detector.check_prediction_error(
+                            pend_up_prob, 1 if next_ret > 0 else 0
+                        )
+                        logger.debug(
+                            f"[AnalysisEngine] 漂移喂源: pred_up={pend_up_prob:.3f} "
+                            f"vs actual={next_ret:+.4f} ({pend_date})"
+                        )
 
-            # 如果有上次预测但没有实际值，使用当前价格的日收益作为实际值
-            if self._last_actual is None and klines and len(klines) >= 2:
-                # 用昨天的实际收益作为实际值
-                prices = [float(k.get('close', 0)) for k in klines[-5:] if float(k.get('close', 0)) > 0]
-                if len(prices) >= 2:
-                    self._last_actual = (prices[-1] - prices[-2]) / prices[-2] if prices[-2] > 0 else 0
+            # ② 配对: 本次分析记为新 pending (下次分析验证)
+            if ml_up_prob is not None and klines:
+                last_date = klines[-1].get('date', '')
+                if last_date:
+                    self._pending_drift_pair = (last_date, ml_up_prob)
 
-            # 检测漂移（基于预测误差）
-            if self._last_prediction is not None and self._last_actual is not None:
-                drift_detected = self.drift_detector.check_prediction_drift(
-                    self._last_prediction, self._last_actual
-                )
-                drift_status = self.drift_detector.get_drift_status()
-                drift_status['drift_detected'] = drift_detected
-
-                if drift_detected:
-                    logger.warning("[AnalysisEngine] 概念漂移检测，ML 预测性能可能已退化")
+            drift_status = self.drift_detector.get_status()
+            if drift_status.get('drift_detected'):
+                logger.warning("[AnalysisEngine] 概念漂移检测，ML 预测性能可能已退化")
         except Exception as e:
             logger.debug(f"[AnalysisEngine] 漂移检测异常: {e}")
+
+        # ── SOTA 模型集成 ─────────────────────
+        sota_models = {}
+
+        # 0. PatchTST 预测 (ICLR 2024 时序基础模型; 2026-09-21 形制修复)
+        # 修复: 旧形直喂 prepare_features 截面特征 reshape (n_feat,1) → 模型
+        # reshape '[1,1,96]' 恒抛 = 每 analyze 2 WARNING + 集成静默缺 patchtst
+        # (自检失明)。现与 sota_predict /api/sota/patchtst/predict 端点共用
+        # (seq_len, 12) 时序形制: build_seq_features_12 从日 K 构窗 (端点实证形)。
+        if HAS_PATCHTST and klines and len(klines) >= 60:
+            try:
+                from modules.models.patchtst_integrator import (
+                    get_patchtst, build_seq_features_12)
+                patchtst = get_patchtst()
+                closes = [float(k['close']) for k in klines
+                          if k.get('close') is not None]
+                vols = [float(k.get('volume') or 0.0) for k in klines]
+                patchtst_X = build_seq_features_12(
+                    closes, vols, seq_len=min(60, len(closes)))
+                if patchtst_X is not None:
+                    result = patchtst.predict(patchtst_X)
+                    if result:
+                        sota_models['patchtst'] = {
+                            'direction': result.get('direction', 'neutral'),
+                            'confidence': round(result.get('confidence', 0.5), 3),
+                            'probabilities': result.get('probabilities', {}),
+                            'trained': patchtst.trained if hasattr(patchtst, 'trained') else False,
+                        }
+                        logger.info(f"[AnalysisEngine] PatchTST 预测: {sota_models['patchtst']['direction']} (conf={sota_models['patchtst']['confidence']:.3f})")
+                else:
+                    logger.debug(f"[AnalysisEngine] PatchTST 跳过 (K 线形制不足, 非断链)")
+            except Exception as e:
+                logger.warning(f"[AnalysisEngine] PatchTST 预测失败 (跳过, 非断链): {e}")
+
+        # 1. Mamba HFT 预测 (使用 ml_predictor.prepare_features)
+        if HAS_MAMBA and klines and len(klines) >= 60:
+            try:
+                from modules.models.hft_mamba import get_mamba_hft_predictor
+                mamba = get_mamba_hft_predictor()
+                features = ml_predictor.prepare_features(stock_data, klines)
+                if features is not None:
+                    if len(features.shape) == 1:
+                        features = features.reshape(1, 1, -1)
+                    elif len(features.shape) == 2:
+                        features = features.reshape(features.shape[0], 1, -1)
+                    result = mamba.predict(features)
+                    sota_models['mamba'] = {
+                        'direction': result.get('direction', 'neutral'),
+                        'confidence': round(result.get('confidence', 0.5), 3),
+                        'probabilities': result.get('probabilities', {}),
+                        'trained': mamba.trained if hasattr(mamba, 'trained') else False,
+                    }
+                    logger.info(f"[AnalysisEngine] Mamba HFT 预测: {sota_models['mamba']['direction']} (conf={sota_models['mamba']['confidence']:.3f})")
+            except Exception as e:
+                logger.warning(f"[AnalysisEngine] Mamba HFT 预测失败: {e}")
+
+        # 2. Diffusion 预测
+        if HAS_DIFFUSION and klines and len(klines) >= 60:
+            try:
+                from modules.models.diffusion_model import get_diffusion_predictor
+                diffusion = get_diffusion_predictor()
+                features = ml_predictor.prepare_features(stock_data, klines)
+                if features is not None:
+                    if len(features.shape) == 1:
+                        features = features.reshape(1, 1, -1)
+                    elif len(features.shape) == 2:
+                        features = features.reshape(features.shape[0], 1, -1)
+                    result = diffusion.predict(features)
+                    uncertainty_raw = result.get('uncertainty', {})
+                    sota_models['diffusion'] = {
+                        'direction': result.get('direction', 'neutral'),
+                        'confidence': round(result.get('confidence', 0.5), 3),
+                        'probabilities': result.get('probabilities', {}),
+                        'uncertainty': float(uncertainty_raw.get('std', 0.1)) if isinstance(uncertainty_raw, dict) else round(uncertainty_raw, 4),
+                        'trained': diffusion.trained if hasattr(diffusion, 'trained') else False,
+                    }
+                    logger.info(f"[AnalysisEngine] Diffusion 预测: {sota_models['diffusion']['direction']} (conf={sota_models['diffusion']['confidence']:.3f})")
+            except Exception as e:
+                logger.warning(f"[AnalysisEngine] Diffusion 预测失败: {e}")
+
+        # 3. DRL 决策
+        if HAS_DRL and klines and len(klines) >= 60:
+            try:
+                from modules.models.drl_agent import get_drl_agent, PortfolioState
+                drl = get_drl_agent()
+                # ── 自动训练：如果未训练，则从 klines 提取特征并训练 ──
+                if not getattr(drl, '_trained', False):
+                    try:
+                        labels = ml_predictor.create_labels(klines, horizon=5)
+                        features = ml_predictor.prepare_features_batch(klines, labels)
+                        if features is not None and len(features) >= 30:
+                            env_data = {
+                                'features': features,
+                                'labels': labels,
+                                'seq_len': len(features),
+                                'n_features': features.shape[1],
+                            }
+                            drl.train(env_data, epochs=50, batch_size=32)
+                            logger.info(f"[AnalysisEngine] DRL 自动训练完成: {len(features)} 样本, 50 epochs")
+                    except Exception as e:
+                        logger.warning(f"[AnalysisEngine] DRL 自动训练失败: {e}")
+                portfolio = PortfolioState()
+                drl_decision = drl.decide(klines, portfolio, stock_code)
+                if drl_decision:
+                    # TradingDecision 是 dataclass，不是 dict
+                    action = getattr(drl_decision, 'action', 'hold')
+                    confidence = getattr(drl_decision, 'confidence', 0.5)
+                    target_weight = getattr(drl_decision, 'target_weight', 0.0)
+                    sota_models['drl'] = {
+                        'action': action,
+                        'confidence': round(float(confidence), 3),
+                        'position_size': round(float(target_weight), 3),
+                        'trained': getattr(drl, '_trained', False),
+                    }
+                    logger.info(f"[AnalysisEngine] DRL 决策: {sota_models['drl']['action']} (conf={sota_models['drl']['confidence']:.3f})")
+            except Exception as e:
+                logger.warning(f"[AnalysisEngine] DRL 决策失败: {e}")
+
+        # 4. Conformal Prediction 区间 (使用 PatchTST/ML 预测作为基础)
+        if HAS_CONFORMAL and klines and len(klines) >= 120:
+            try:
+                from modules.models.conformal_predictor import get_conformal_predictor
+                closes = np.array([float(k.get('close', 0)) for k in klines if float(k.get('close', 0)) > 0])
+                if len(closes) >= 120:
+                    # 用历史收益率校准: 取前 150 根 K 线的收益率作为校准集 (约 149 样本)
+                    # 之前的 closes[-100:-40] 只有 60 个收盘价 → np.diff 后仅 59 样本
+                    cal_window = min(150, len(closes) - 10)
+                    cal_returns = np.diff(closes[:cal_window]) / closes[:cal_window][:-1]
+                    test_closes = closes[-10:]
+                    test_returns = np.diff(test_closes) / test_closes[:-1]
+                    if len(cal_returns) >= 50 and len(test_returns) > 0:
+                        conformal = get_conformal_predictor()
+                        X_cal = np.zeros((len(cal_returns), 1))
+                        conformal.calibrate(X_cal, cal_returns)
+                        conformal_result = conformal.predict_with_interval(test_returns[-1].reshape(1, 1))
+                        if conformal_result:
+                            sota_models['conformal'] = {
+                                'point_prediction': round(float(conformal_result.prediction), 6),
+                                'lower_bound': round(float(conformal_result.lower), 6),
+                                'upper_bound': round(float(conformal_result.upper), 6),
+                                'confidence_interval': round(float(conformal_result.upper - conformal_result.lower), 6),
+                                'coverage_probability': round(1.0 - conformal.alpha, 2),
+                                'calibrated': conformal_result.calibrated if hasattr(conformal_result, 'calibrated') else True,
+                            }
+                            logger.info(f"[AnalysisEngine] Conformal 预测区间: [{sota_models['conformal']['lower_bound']:.4f}, {sota_models['conformal']['upper_bound']:.4f}]")
+            except Exception as e:
+                logger.warning(f"[AnalysisEngine] Conformal Prediction 失败: {e}")
+
+        # 5. Alpha158 因子计算
+        if HAS_ALPHA158 and klines and len(klines) >= 60:
+            try:
+                from modules.factors.alpha158_calculator import get_alpha158_calculator
+                calc = get_alpha158_calculator()
+                alpha_factors = calc.calculate_all(klines)
+                if alpha_factors:
+                    latest_values = {}
+                    for k, v in alpha_factors.items():
+                        # 支持标量和 numpy 数组两种返回类型
+                        if isinstance(v, np.ndarray) and len(v) > 0:
+                            last_val = v[-1]
+                        elif np.isscalar(v):
+                            last_val = v
+                        else:
+                            continue
+                        if np.isscalar(last_val) and not np.isnan(last_val) and not np.isinf(last_val):
+                            latest_values[k] = round(float(last_val), 4)
+                    top_factors = sorted(latest_values.items(), key=lambda x: abs(x[1]), reverse=True)[:20]
+                    sota_models['alpha158'] = {
+                        'n_factors': len(latest_values),
+                        'top_factors': dict(top_factors),
+                        'latest_values': latest_values,
+                        'available': len(latest_values) > 0,
+                    }
+                    logger.info(f"[AnalysisEngine] Alpha158: 计算 {sota_models['alpha158']['n_factors']} 个因子")
+            except Exception as e:
+                logger.warning(f"[AnalysisEngine] Alpha158 因子计算失败: {e}")
+
+        # 6. GNN 图神经网络预测 (需要 12 维特征)
+        # 2026-09-03: 仅 trained 真信号才注入 (未训练 = 无信息随机权重, 直接跳过不占投票;
+        # GNNPredictor.train 门控: holdout_acc>0.4 才算 trained)
+        if HAS_GNN and klines and len(klines) >= 60:
+            try:
+                from modules.models.gnn_predictor import get_gnn_predictor
+                gnn = get_gnn_predictor()
+                if gnn is not None and getattr(gnn, '_is_trained', False):
+                    features = ml_predictor.prepare_features(stock_data, klines)
+                    if features is not None:
+                        # GNN 期望 (1, n_features) — 单只股票
+                        if len(features.shape) == 1 and features.shape[0] == gnn.n_features:
+                            gnn_pred = gnn.predict(features.reshape(1, -1))
+                            if gnn_pred:
+                                conf = gnn_pred.get('confidence', [0.5])
+                                if isinstance(conf, list):
+                                    conf = conf[0] if conf else 0.5
+                                sota_models['gnn'] = {
+                                    'direction': gnn_pred.get('predictions', ['neutral'])[0] if isinstance(gnn_pred.get('predictions'), list) else gnn_pred.get('direction', 'neutral'),
+                                    'confidence': round(float(conf), 3),
+                                    'is_trained': gnn_pred.get('is_trained', False),
+                                }
+                                logger.info(f"[AnalysisEngine] GNN 预测: {sota_models['gnn']['direction']} (conf={sota_models['gnn']['confidence']:.3f})")
+            except Exception as e:
+                logger.warning(f"[AnalysisEngine] GNN 预测失败: {e}")
+
+        # 7. Cross-Market 跨市场因子
+        if HAS_CROSS_MARKET:
+            try:
+                from modules.cross_market import get_cross_market_analyzer
+                analyzer = get_cross_market_analyzer()
+                market_summary = analyzer.get_summary()
+                if market_summary:
+                    sota_models['cross_market'] = {
+                        'total_stocks': market_summary.get('total_stocks', 0),
+                        'markets': market_summary.get('markets', {}),
+                        'correlations_computed': market_summary.get('correlations_computed', False),
+                        'available': True,
+                    }
+                    logger.info(f"[AnalysisEngine] Cross-Market: {sota_models['cross_market']['total_stocks']} 只股票已注册")
+            except Exception as e:
+                logger.warning(f"[AnalysisEngine] Cross-Market 分析失败: {e}")
+
+        # 8. Sentiment 情感分析 (从 stock_data 获取新闻，无 news 则自动获取)
+        if HAS_SENTIMENT:
+            try:
+                from modules.sentiment_engine import get_sentiment_engine
+                engine = get_sentiment_engine()
+                news_texts = []
+                if stock_data.get('news'):
+                    for news in stock_data.get('news', [])[:10]:
+                        if isinstance(news, dict):
+                            news_texts.append(news.get('title', '') + ' ' + news.get('content', ''))
+                        elif isinstance(news, str):
+                            news_texts.append(news)
+                # 如果 stock_data 没有 news，自动获取
+                if not news_texts:
+                    stock_code = stock_data.get('code', '')
+                    if stock_code:
+                        try:
+                            from modules.data_fetcher import StockDataFetcher
+                            df = StockDataFetcher()
+                            news_list = df.get_stock_news(stock_code)
+                            if news_list:
+                                for news in news_list[:10]:
+                                    if isinstance(news, dict):
+                                        news_texts.append(news.get('title', '') + ' ' + news.get('content', ''))
+                                    elif isinstance(news, str):
+                                        news_texts.append(news)
+                        except Exception:
+                            pass
+                if news_texts:
+                    sentiment_results = engine.analyze_batch(news_texts) if hasattr(engine, 'analyze_batch') else [engine.analyze(t) for t in news_texts[:5]]
+                    avg_score = float(np.mean([r.get('score', 0) for r in sentiment_results]))
+                    avg_confidence = float(np.mean([r.get('confidence', 0) for r in sentiment_results]))
+                    positive_count = sum(1 for r in sentiment_results if r.get('label') == 'positive')
+                    negative_count = sum(1 for r in sentiment_results if r.get('label') == 'negative')
+                    neutral_count = len(sentiment_results) - positive_count - negative_count
+                    sota_models['sentiment'] = {
+                        'score': round(avg_score, 4),
+                        'confidence': round(avg_confidence, 4),
+                        'label': 'positive' if avg_score > 0.1 else 'negative' if avg_score < -0.1 else 'neutral',
+                        'positive_ratio': round(positive_count / len(sentiment_results), 3) if sentiment_results else 0.5,
+                        'negative_ratio': round(negative_count / len(sentiment_results), 3) if sentiment_results else 0.5,
+                        'neutral_ratio': round(neutral_count / len(sentiment_results), 3) if sentiment_results else 0.5,
+                        'n_articles': len(sentiment_results),
+                        'available': True,
+                    }
+                    logger.info(f"[AnalysisEngine] Sentiment: {sota_models['sentiment']['label']} (score={sota_models['sentiment']['score']:.3f}, articles={sota_models['sentiment']['n_articles']})")
+                elif klines and len(klines) >= 20:
+                    # 降级方案：基于价格动量计算市场情绪
+                    closes = np.array([float(k.get('close', 0)) for k in klines[-20:]])
+                    returns = np.diff(closes) / closes[:-1]
+                    avg_ret = float(np.mean(returns))
+                    recent_5d = float(np.mean(returns[-5:])) if len(returns) >= 5 else avg_ret
+                    score = round(np.tanh(avg_ret * 10), 4)  # 归一化到 [-1, 1]
+                    sota_models['sentiment'] = {
+                        'score': score,
+                        'confidence': 0.3,
+                        'label': 'positive' if score > 0.1 else 'negative' if score < -0.1 else 'neutral',
+                        'positive_ratio': max(0.5, 0.5 + score / 2),
+                        'negative_ratio': max(0.5, 0.5 - score / 2),
+                        'neutral_ratio': max(0.0, 1.0 - abs(score)),
+                        'n_articles': 0,
+                        'available': True,
+                        'method': 'price_momentum_fallback',
+                    }
+                    logger.info(f"[AnalysisEngine] Sentiment (价格动量降级): {sota_models['sentiment']['label']} (score={score:.3f})")
+            except Exception as e:
+                logger.warning(f"[AnalysisEngine] Sentiment 分析失败: {e}")
+
+        # ── 综合 SOTA 模型投票 ─────────────────────
+        sota_vote = {'up': 0, 'down': 0, 'neutral': 0}
+        sota_confidences = []
+        for name, pred in sota_models.items():
+            if pred.get('direction') in ('up', 'down'):
+                sota_vote[pred['direction']] += 1
+                sota_confidences.append(pred.get('confidence', 0.5))
+            elif pred.get('drl', {}).get('action') == 'buy':
+                sota_vote['up'] += 1
+                sota_confidences.append(pred.get('drl', {}).get('confidence', 0.5))
+            elif pred.get('drl', {}).get('action') == 'sell':
+                sota_vote['down'] += 1
+                sota_confidences.append(pred.get('drl', {}).get('confidence', 0.5))
+
+        sota_consensus = max(sota_vote, key=sota_vote.get) if any(sota_vote.values()) else 'neutral'
+        sota_agreement = max(sota_vote.values()) / max(sum(sota_vote.values()), 1)
+        sota_avg_confidence = float(np.mean(sota_confidences)) if sota_confidences else 0.5
+
+        # ── P1: 统一决策引擎 — 使用预计算结果 (消除 HTTP 自调) ──
+        try:
+            from modules.unified_decision_engine import get_unified_decision_engine
+            ude = get_unified_decision_engine()
+            ude_result = ude.decide_from_predictions(
+                stock_code, sota_models, klines
+            )
+            # UDE 结果覆盖简单投票结果
+            # model_votes: Dict[str, str] (model→direction, 无置信度) — 取均值会 int+str;
+            # conf 保留上方 SOTA 投票均值, UDE 只覆盖方向与共识度 (2026-09-19 断链修复)
+            sota_consensus = ude_result.direction
+            sota_agreement = ude_result.consensus
+            logger.info(
+                f"[AnalysisEngine] UDE 统一决策: {sota_consensus} "
+                f"(conf={ude_result.confidence:.2f}, models={ude_result.n_models})"
+            )
+        except Exception as e:
+            logger.warning(f"[AnalysisEngine] UDE 统一决策失败: {e}")
+
+        # ── P2: 多模态融合预测 — 接入生产流水线 ──
+        try:
+            from modules.multi_modal_fusion import get_multi_modal_fusion
+            from modules.hmm_market_detector import MarketRegimeDetector
+            regime_detector = MarketRegimeDetector()
+            regime_info = regime_detector.get_regime_with_confidence(stock_data or {}, klines)
+            fusion_regime = regime_info.get('regime', 'sideways')
+            # HMM 返回 'bull'/'bear'/'sideways' → 映射到 fusion 的 'bullish'/'bearish'/'sideways'
+            regime_map = {'bull': 'bullish', 'bear': 'bearish', 'sideways': 'sideways'}
+            fusion_regime = regime_map.get(fusion_regime, 'sideways')
+
+            fusion = get_multi_modal_fusion()
+            fusion_result = fusion.predict(stock_code, fusion_regime, use_cache=True)
+
+            # 注入 sota_models → UDE 自动纳入投票
+            sota_models['multi_modal_fusion'] = {
+                'direction': fusion_result.get('direction'),
+                'confidence': fusion_result.get('confidence', 0.5),
+                'regime': fusion_regime,
+                'modalities': fusion_result.get('modalities', {}),
+                'consensus': fusion_result.get('consensus', 0.0),
+            }
+            logger.info(
+                f"[MultiModalFusion] 融合预测: {stock_code} "
+                f"→ {fusion_result['direction']} (conf={fusion_result['confidence']:.2f}, "
+                f"regime={fusion_regime}, consensus={fusion_result.get('consensus', 0):.2f})"
+            )
+        except Exception as e:
+            logger.warning(f"[MultiModalFusion] 融合预测失败: {e}")
+
+        # ── P1: Alpha 衰减监控 — 记录因子值 + 实际收益 ──
+        try:
+            if klines and len(klines) >= 2 and 'alpha158' in sota_models:
+                from modules.factors.factor_ic_monitor import factor_ic_monitor
+                alpha_factors = sota_models['alpha158'].get('latest_values', {})
+                if alpha_factors and len(alpha_factors) > 0:
+                    closes = [float(k.get('close', 0)) for k in klines if float(k.get('close', 0)) > 0]
+                    if len(closes) >= 2:
+                        actual_return = (closes[-1] - closes[-2]) / closes[-2]
+                        factor_ic_monitor.record_factor_return(
+                            stock_code, alpha_factors, actual_return
+                        )
+                        logger.debug(
+                            f"[AlphaDecay] 记录: {stock_code} return={actual_return:+.4f} "
+                            f"factors={len(alpha_factors)}"
+                        )
+        except Exception as e:
+            logger.debug(f"[AlphaDecay] 因子监控失败: {e}")
+
+        # ── P2: 多模态融合 — IC 追踪记录实际收益 ──
+        try:
+            if klines and 'multi_modal_fusion' in sota_models:
+                from modules.multi_modal_fusion import get_multi_modal_fusion
+                fusion = get_multi_modal_fusion()
+                modalities = sota_models['multi_modal_fusion'].get('modalities', {})
+                closes = [float(k.get('close', 0)) for k in klines if float(k.get('close', 0)) > 0]
+                if len(closes) >= 2:
+                    actual_return = (closes[-1] - closes[-2]) / closes[-2]
+                    fusion._ic_tracker.record(modalities, actual_return)
+        except Exception as e:
+            logger.debug(f"[MultiModalFusion] IC 追踪失败: {e}")
 
         return {
             'model': {
@@ -453,6 +1006,15 @@ class AnalysisEngine:
                 'ml_probabilities': {k: round(v, 3) for k, v in ml_pred.get('probabilities', {}).items()},
                 'ml_trained': ml_trained,
                 'model_report': model_report,
+                # Time-LLM 统一预测
+                'time_llm': time_llm_pred,
+                'time_llm_regime': time_llm_regime,
+                'time_llm_regime_weights': time_llm_regime_weights,
+                'time_llm_models_used': time_llm_models_used,
+                # Regime-Switching 多模型预测
+                'regime_switching': regime_pred,
+                'regime_detected': regime_detected,
+                'regime_weights': regime_weights,
             },
             'kelly': kelly_info,
             'scenarios': scenarios,
@@ -461,11 +1023,16 @@ class AnalysisEngine:
             'daily_volatility': round(daily_vol * 100, 2),
             'month_volatility': round(month_vol * 100, 2),
             'drift_status': drift_status,  # P0: 概念漂移检测状态
+            # ── SOTA 模型集成 ──
+            'sota_models': sota_models,
+            'sota_consensus': sota_consensus,
+            'sota_agreement': round(sota_agreement, 3),
+            'sota_avg_confidence': round(sota_avg_confidence, 4),
         }
     
     def comprehensive_analysis(self, stock_data: Dict, industry: str = '光通信', cost_basis: float = 120) -> Dict:
         """Perform comprehensive analysis"""
-        return {
+        analysis = {
             'basic_info': {
                 'name': stock_data.get('name', ''),
                 'code': stock_data.get('code', ''),
@@ -485,6 +1052,43 @@ class AnalysisEngine:
                 'status': '✅ 大幅盈利' if stock_data.get('price', 0) > cost_basis else '❌ 亏损'
             }
         }
+
+        # ── Sentiment 情感分析 ──
+        if HAS_SENTIMENT:
+            try:
+                from modules.sentiment_engine import get_sentiment_engine
+                engine = get_sentiment_engine()
+                news_texts = []
+                if stock_data.get('news'):
+                    for news in stock_data.get('news', [])[:10]:
+                        if isinstance(news, dict):
+                            news_texts.append(news.get('title', '') + ' ' + news.get('content', ''))
+                        elif isinstance(news, str):
+                            news_texts.append(news)
+                if news_texts:
+                    sentiment_results = engine.analyze_batch(news_texts) if hasattr(engine, 'analyze_batch') else [engine.analyze(t) for t in news_texts[:5]]
+                    avg_score = np.mean([r.get('score', 0) for r in sentiment_results])
+                    avg_confidence = np.mean([r.get('confidence', 0) for r in sentiment_results])
+                    positive_count = sum(1 for r in sentiment_results if r.get('label') == 'positive')
+                    negative_count = sum(1 for r in sentiment_results if r.get('label') == 'negative')
+                    neutral_count = len(sentiment_results) - positive_count - negative_count
+                    analysis['sentiment'] = {
+                        'score': round(float(avg_score), 4),
+                        'confidence': round(float(avg_confidence), 4),
+                        'label': 'positive' if avg_score > 0.1 else 'negative' if avg_score < -0.1 else 'neutral',
+                        'positive_ratio': round(positive_count / len(sentiment_results), 3) if sentiment_results else 0.5,
+                        'negative_ratio': round(negative_count / len(sentiment_results), 3) if sentiment_results else 0.5,
+                        'neutral_ratio': round(neutral_count / len(sentiment_results), 3) if sentiment_results else 0.5,
+                        'n_articles': len(sentiment_results),
+                    }
+                    logger.info(f"[AnalysisEngine] Sentiment: {analysis['sentiment']['label']} (score={analysis['sentiment']['score']:.3f})")
+            except Exception as e:
+                logger.warning(f"[AnalysisEngine] Sentiment 分析失败: {e}")
+                analysis['sentiment'] = {'label': 'neutral', 'score': 0.0, 'confidence': 0.0, 'available': False}
+        else:
+            analysis['sentiment'] = {'label': 'neutral', 'score': 0.0, 'confidence': 0.0, 'available': False}
+
+        return analysis
 
     def comprehensive_analysis_cached(self, stock_code: str,
                                        stock_data: Dict,
@@ -507,39 +1111,6 @@ class AnalysisEngine:
         result = self.comprehensive_analysis(stock_data, industry, cost_basis)
         cache.set(cache_key, result, category='realtime', tags={stock_code})
         return result
-
-
-class KlineSignalAnalysisMixin:
-    """K线信号分析混入类"""
-    
-    def __init__(self):
-        from .kline_signal_analyzer import KlineSignalAnalyzer
-        from .fund_flow_optimizer import FundFlowOptimizer
-        self.kline_analyzer = KlineSignalAnalyzer()
-        self.fund_flow_optimizer = FundFlowOptimizer()
-    
-    def kline_signal_analysis(self, stock_data: Dict) -> Dict:
-        """K线信号分析"""
-        return self.kline_analyzer.generate_kline_signals(stock_data)
-
-
-class MultiFactorAnalysis:
-    """多因子分析混入类"""
-
-    def __init__(self):
-        from .multi_factor_model import MultiFactorModel
-        self.multi_factor = MultiFactorModel()
-
-    def multi_factor_analysis(self, stock_data: Dict) -> Dict:
-        """多因子分析"""
-        scores = self.multi_factor.calculate_scores(stock_data)
-        exposure = self.multi_factor.get_factor_exposure(stock_data)
-
-        return {
-            'scores': scores,
-            'exposure': exposure,
-            'summary': f"综合评分 {scores['weighted_score']:.1f} ({scores['rating']})",
-        }
 
 
 class FactorWeightScheduler:
@@ -682,3 +1253,149 @@ class FactorWeightScheduler:
                 logger.error(f"[FactorWeightScheduler] 调度循环异常: {e}")
 
             time.sleep(60)  # 每分钟检查一次
+
+    # ── 扩展方法: ICIR 动态权重调度 ─────────────────────────────
+
+    def update_ic(self, factor_name: str, ic_value: float):
+        """
+        更新因子 IC 历史 (扩展方法)
+
+        Args:
+            factor_name: 因子名称
+            ic_value: IC 值
+        """
+        with self._lock:
+            if not hasattr(self, '_ic_history'):
+                self._ic_history: Dict[str, List[float]] = {}
+            if factor_name not in self._ic_history:
+                self._ic_history[factor_name] = []
+            self._ic_history[factor_name].append(ic_value)
+            # 保持最近 60 条
+            self._ic_history[factor_name] = self._ic_history[factor_name][-60:]
+
+    def compute_icir(self, factor_name: str, window: int = 20) -> float:
+        """
+        计算因子 ICIR (IC Information Ratio)
+
+        Args:
+            factor_name: 因子名称
+            window: 滚动窗口
+
+        Returns:
+            ICIR 值
+        """
+        history = getattr(self, '_ic_history', {}).get(factor_name, [])
+        if len(history) < window:
+            return 0.0
+        recent = history[-window:]
+        arr = np.array(recent)
+        mean_ic = np.mean(arr)
+        std_ic = np.std(arr)
+        if std_ic < 1e-10:
+            return 0.0
+        return float(mean_ic / std_ic)
+
+    def rebalance(self) -> Dict[str, float]:
+        """
+        基于 ICIR 重新平衡因子权重 (扩展方法)
+
+        Returns:
+            新的因子权重
+        """
+        icirs = self.get_icir_ranking()
+        abs_icirs = [abs(icir) for _, icir in icirs]
+        total_abs = sum(abs_icirs)
+
+        if total_abs > 0:
+            # 按 ICIR 绝对值分配权重
+            new_weights = {}
+            for factor_name, icir in icirs:
+                idx = icirs.index((factor_name, icir))
+                weight = abs_icirs[idx] / total_abs
+                new_weights[factor_name] = weight
+        else:
+            # 无 IC 数据时回退到当前权重
+            new_weights = dict(getattr(self.factor_model, 'factor_weights', {}))
+            total = sum(new_weights.values())
+            if total > 0:
+                new_weights = {k: v / total for k, v in new_weights.items()}
+
+        # 更新因子模型的权重
+        if hasattr(self.factor_model, 'factor_weights'):
+            self.factor_model.factor_weights = new_weights
+
+        # 记录重平衡
+        if not hasattr(self, '_rebalance_count'):
+            self._rebalance_count = 0
+        self._rebalance_count += 1
+        logger.info(f"[FactorWeightScheduler] 因子权重已重新平衡 (第{self._rebalance_count}次)")
+
+        return new_weights
+
+    def get_icir_ranking(self) -> List[Tuple[str, float]]:
+        """
+        获取因子 ICIR 排名
+
+        Returns:
+            [(factor_name, icir), ...] 按 ICIR 绝对值降序
+        """
+        icirs = []
+        factor_history = getattr(self, '_factor_history', {})
+        for factor_name in factor_history:
+            icir = self.compute_icir(factor_name)
+            icirs.append((factor_name, icir))
+        icirs.sort(key=lambda x: abs(x[1]), reverse=True)
+        return icirs
+
+    def get_smoothed_weights(self) -> Dict[str, float]:
+        """
+        获取平滑后的权重 (扩展方法)
+
+        Returns:
+            平滑后的因子权重
+        """
+        current = getattr(self.factor_model, 'factor_weights', {})
+        if not hasattr(self, '_previous_weights'):
+            self._previous_weights = dict(current)
+            self._smoothing_factor = 0.3
+
+        smoothed = {}
+        for fname in current:
+            prev = self._previous_weights.get(fname, 0)
+            cur = current.get(fname, 0)
+            smoothed[fname] = (1 - self._smoothing_factor) * prev + self._smoothing_factor * cur
+            smoothed[fname] = round(smoothed[fname], 6)
+
+        # 归一化
+        total = sum(smoothed.values())
+        if total > 0:
+            smoothed = {k: v / total for k, v in smoothed.items()}
+
+        # 更新之前的权重
+        self._previous_weights = dict(current)
+
+        return smoothed
+
+    def get_status(self) -> Dict:
+        """获取调度器状态 (重写，包含扩展信息)"""
+        base_status = super().get_status() if hasattr(super(), 'get_status') else {}
+        icirs = self.get_icir_ranking()
+        return {
+            **base_status,
+            'current_weights': dict(getattr(self.factor_model, 'factor_weights', {})),
+            'smoothed_weights': self.get_smoothed_weights(),
+            'icir_ranking': [{'factor': f, 'icir': round(i, 4)} for f, i in icirs[:10]],
+            'rebalance_count': getattr(self, '_rebalance_count', 0),
+            'drift_detected': getattr(self, '_drift_detected', False),
+            'should_rebalance': getattr(self, '_drift_detected', False),
+            'smoothing_factor': getattr(self, '_smoothing_factor', 0.3),
+        }
+
+    def on_drift_detected(self):
+        """当检测到概念漂移时调用 (扩展方法)"""
+        self._drift_detected = True
+        logger.warning("[FactorWeightScheduler] 检测到概念漂移，将加速权重调整")
+
+    def on_drift_reset(self):
+        """当漂移检测重置时调用 (扩展方法)"""
+        self._drift_detected = False

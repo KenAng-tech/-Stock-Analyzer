@@ -1,7 +1,15 @@
 // Stock Analyzer - Main JavaScript
 
-const API_BASE = 'http://localhost:5002';
+// API_BASE 已由 core.js 定义，此处复用
 let currentReportFile = '';
+
+// Phase 2: API Key 请求头注入
+function _apiHeaders(extra = {}) {
+    const headers = { ...extra };
+    const key = typeof getApiKey === 'function' ? getApiKey() : '';
+    if (key) headers['X-API-Key'] = key;
+    return headers;
+}
 
 // Section Navigation
 function showSection(sectionId) {
@@ -32,11 +40,59 @@ function showTab(tabId) {
     event.target.classList.add('active');
 }
 
+// DOM 安全访问工具
+function $(id) {
+    const el = document.getElementById(id);
+    if (!el) console.warn(`[DOM] Element not found: #${id}`);
+    return el;
+}
+
+// Show Toast Notification
+function showToast(message, type = 'info') {
+    const colors = {
+        success: '#10b981',
+        error: '#ef4444',
+        warning: '#f59e0b',
+        info: '#3b82f6',
+    };
+    const color = colors[type] || colors.info;
+
+    // 移除已有 toast
+    const existing = document.getElementById('toastNotification');
+    if (existing) existing.remove();
+
+    const toast = document.createElement('div');
+    toast.id = 'toastNotification';
+    toast.style.cssText = `
+        position: fixed; top: 20px; right: 20px; z-index: 10000;
+        background: ${color}; color: #fff; padding: 14px 24px;
+        border-radius: 8px; font-size: 14px; font-weight: 600;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        transform: translateX(120%); transition: transform 0.3s ease;
+        max-width: 400px;
+    `;
+    toast.textContent = message;
+    document.body.appendChild(toast);
+
+    // 滑入动画
+    requestAnimationFrame(() => {
+        toast.style.transform = 'translateX(0)';
+    });
+
+    // 3 秒后自动消失
+    setTimeout(() => {
+        toast.style.transform = 'translateX(120%)';
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+}
+
 // Show/Hide Loading
 function showLoading(show) {
     const overlay = document.getElementById('loadingOverlay');
     if (overlay) {
         overlay.classList.toggle('active', show);
+        // 清除可能残留的 inline display 样式 (loadSOTADashboard 设置的 display: flex/none)
+        overlay.style.display = show ? 'flex' : 'none';
     }
 }
 
@@ -50,18 +106,68 @@ function refreshData() {
 async function fetchStockData(stockCode) {
     showLoading(true);
     try {
-        const response = await fetch(`${API_BASE}/api/stock/${stockCode}`);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 20000); // 20s 超时
+        const response = await fetch(`${API_BASE}/api/stock/${stockCode}`, {
+            signal: controller.signal,
+            headers: _apiHeaders(),
+        });
+        clearTimeout(timeout);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
         const result = await response.json();
-        
-        if (result.success) {
+
+        if (result.success && result.data) {
             updateStockDisplay(result.data);
+        } else {
+            console.error('[fetchStockData] API 返回失败:', result.error || '无 data 字段');
         }
     } catch (error) {
-        console.error('Error fetching stock data:', error);
-        alert('获取股票数据失败，请检查网络连接');
+        console.error('[fetchStockData] 请求失败:', error.name === 'AbortError' ? '请求超时 (20s)' : error.message);
     } finally {
         showLoading(false);
     }
+}
+
+// 仪表盘数据加载 — 在 app.js 中定义确保 initOnReady 可用
+async function loadDashboardData() {
+    const stockCode = document.getElementById('stockCode')?.value || 'sz300620';
+    console.log('[loadDashboardData] 开始加载，股票代码:', stockCode);
+    async function _load(timeoutMs = 20000) {
+        try {
+            const url = `${API_BASE}/api/stock/${stockCode}`;
+            console.log('[loadDashboardData] 请求 URL:', url);
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), timeoutMs);
+            const response = await fetch(url, {
+                signal: controller.signal,
+                headers: _apiHeaders(),
+            });
+            clearTimeout(timeout);
+            console.log('[loadDashboardData] 响应状态:', response.status);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const result = await response.json();
+            console.log('[loadDashboardData] 响应数据:', result.success ? 'success' : 'failed');
+            if (result.success && result.data) {
+                console.log('[loadDashboardData] 调用 updateStockDisplay');
+                updateStockDisplay(result.data);
+                console.log('[loadDashboardData] ✅ 更新完成');
+                return true;
+            }
+            return false;
+        } catch (e) {
+            console.error('[loadDashboardData] _load 失败:', e.message);
+            return false;
+        }
+    }
+    // 首次加载
+    if (await _load(20000)) return;
+    console.error('[loadDashboardData] 首次加载失败，1s 后重试...');
+    // 首次请求可能因服务器冷启动超时，1s 后重试（缓存已预热）
+    await new Promise(r => setTimeout(r, 1000));
+    if (await _load(15000)) return;
+    console.error('[loadDashboardData] 重试也失败');
 }
 
 // Analyze Stock
@@ -78,7 +184,7 @@ async function analyzeStock() {
         const url = `${API_BASE}/api/analyze/${stockCode}?cost_basis=${costBasis}`;
         console.log('Fetching:', url);
         
-        const response = await fetch(url);
+        const response = await fetch(url, { headers: _apiHeaders() });
         console.log('Response status:', response.status);
         
         if (!response.ok) {
@@ -133,7 +239,7 @@ async function analyzeStock() {
                 console.error('Error updating report:', e);
             }
             
-            currentReportFile = result.report_file;
+            currentReportFile = result.report_filename || result.report_file;
             console.log('Analysis completed successfully');
             console.log('Report length:', result.report ? result.report.length : 0);
             
@@ -150,6 +256,9 @@ async function analyzeStock() {
             } catch (e) {
                 console.error('Error switching section:', e);
             }
+
+            // 显示完成通知
+            showToast('✅ 分析完成！已切换到分析面板', 'success');
 
             // Scroll to report section after brief delay
             setTimeout(() => {
@@ -174,37 +283,55 @@ async function analyzeStock() {
 
 // Update Dashboard Display
 function updateStockDisplay(data) {
+    console.log('[updateStockDisplay] 开始更新，data:', data);
     try {
         if (!data) {
-            console.error('Invalid stock data:', data);
+            console.error('[updateStockDisplay] Invalid stock data:', data);
             return;
         }
 
         const price = parseFloat(data.price) || 0;
-        document.getElementById('currentPrice').textContent = price.toFixed(2);
-        document.getElementById('heroPrice').textContent = price.toFixed(2);
+        const el1 = document.getElementById('currentPrice');
+        const el2 = document.getElementById('heroPrice');
+        console.log('[updateStockDisplay] currentPrice el:', el1 ? 'found' : 'NULL');
+        if (el1) el1.textContent = price.toFixed(2);
+        if (el2) el2.textContent = price.toFixed(2);
 
         const changePct = parseFloat(data.change_pct) || 0;
         const changeClass = changePct >= 0 ? 'positive' : 'negative';
         const changeText = changePct >= 0 ? `+${changePct.toFixed(2)}%` : `${changePct.toFixed(2)}%`;
         const priceChangeEl = document.getElementById('priceChange');
-        priceChangeEl.textContent = changeText;
-        priceChangeEl.className = 'card-change ' + changeClass;
+        if (priceChangeEl) {
+            priceChangeEl.textContent = changeText;
+            priceChangeEl.className = 'card-change ' + changeClass;
+        }
 
         const heroChangeEl = document.getElementById('heroChange');
-        heroChangeEl.textContent = changeText;
-        heroChangeEl.className = 'hero-change ' + changeClass;
+        if (heroChangeEl) {
+            heroChangeEl.textContent = changeText;
+            heroChangeEl.className = 'hero-change ' + changeClass;
+        }
 
-        document.getElementById('volume').textContent = (parseFloat(data.volume) || 0).toLocaleString();
-        document.getElementById('turnover').textContent = (parseFloat(data.turnover) || 0).toFixed(2);
-        document.getElementById('openPrice').textContent = (parseFloat(data.open) || 0).toFixed(2);
-        document.getElementById('highPrice').textContent = (parseFloat(data.high) || 0).toFixed(2);
-        document.getElementById('lowPrice').textContent = (parseFloat(data.low) || 0).toFixed(2);
-        document.getElementById('peRatio').textContent = (parseFloat(data.pe) || 0).toFixed(2);
-        document.getElementById('marketCap').textContent = (parseFloat(data.market_cap) || 0).toFixed(2);
-        document.getElementById('yearRange').textContent = `${(parseFloat(data.year_high) || 0).toFixed(2)} / ${(parseFloat(data.year_low) || 0).toFixed(2)}`;
+        const volEl = document.getElementById('volume');
+        if (volEl) volEl.textContent = (parseFloat(data.volume) || 0).toLocaleString();
+        const turnEl = document.getElementById('turnover');
+        if (turnEl) turnEl.textContent = (parseFloat(data.turnover) || 0).toFixed(2);
+        const openEl = document.getElementById('openPrice');
+        if (openEl) openEl.textContent = (parseFloat(data.open) || 0).toFixed(2);
+        const highEl = document.getElementById('highPrice');
+        if (highEl) highEl.textContent = (parseFloat(data.high) || 0).toFixed(2);
+        const lowEl = document.getElementById('lowPrice');
+        if (lowEl) lowEl.textContent = (parseFloat(data.low) || 0).toFixed(2);
+        const peEl = document.getElementById('peRatio');
+        if (peEl) peEl.textContent = (parseFloat(data.pe) || 0).toFixed(2) + ' 倍';
+        const mcEl = document.getElementById('marketCap');
+        if (mcEl) mcEl.textContent = (parseFloat(data.market_cap) || 0).toFixed(2) + ' 亿元';
+        const yrEl = document.getElementById('yearRange');
+        if (yrEl) yrEl.textContent = `${(parseFloat(data.year_high) || 0).toFixed(2)} / ${(parseFloat(data.year_low) || 0).toFixed(2)}`;
+
+        console.log('[updateStockDisplay] ✅ 更新完成');
     } catch (error) {
-        console.error('Error updating stock display:', error);
+        console.error('[updateStockDisplay] 更新失败:', error);
     }
 }
 
@@ -249,26 +376,35 @@ function updateDashboard(analysis) {
             document.getElementById('turnover').textContent = (parseFloat(analysis.fund_flow.volume_analysis.turnover) || 0).toFixed(2);
         }
 
-        // Update stats
-        if (analysis.technical) {
-            const tech = analysis.technical;
-            document.getElementById('openPrice').textContent = (parseFloat(tech.moving_averages?.ma5) || 0).toFixed(2);
-            // Use .price (number) not .level (string like "今日开盘价")
-            const firstResist = tech.support_resistance?.resistances?.[0];
-            document.getElementById('highPrice').textContent = (parseFloat(firstResist?.price) || 0).toFixed(2);
-            const firstSupport = tech.support_resistance?.supports?.[0];
-            document.getElementById('lowPrice').textContent = (parseFloat(firstSupport?.price) || 0).toFixed(2);
-        }
-
+        // 估值指标: 使用基本面数据 (如果可用), 否则保留 updateStockDisplay 设置的实时行情数据
         if (analysis.fundamental && analysis.fundamental.valuation) {
-            document.getElementById('peRatio').textContent = (parseFloat(analysis.fundamental.valuation.pe) || 0).toFixed(2);
-            document.getElementById('marketCap').textContent = (parseFloat(analysis.fundamental.valuation.market_cap) || 0).toFixed(2);
+            const pe = parseFloat(analysis.fundamental.valuation.pe);
+            const mc = parseFloat(analysis.fundamental.valuation.market_cap);
+            if (!isNaN(pe) && pe > 0) {
+                document.getElementById('peRatio').textContent = pe.toFixed(2) + ' 倍';
+            }
+            if (!isNaN(mc) && mc > 0) {
+                document.getElementById('marketCap').textContent = mc.toFixed(2) + ' 亿元';
+            }
         }
-        document.getElementById('yearRange').textContent = `-- / --`;
+        // 注意: openPrice/highPrice/lowPrice/yearRange 由 updateStockDisplay() 从腾讯实时行情正确设置
+        // 此处不再覆盖, 避免用 MA5/支撑阻力位错误替换真实价格数据
     } catch (error) {
         console.error('Error updating dashboard:', error);
         alert('更新仪表盘失败: ' + error.message);
     }
+
+    // Phase 2: 数据溯源 footer (添加到 dashboard 容器底部)
+    try {
+        const dashboardEl = document.getElementById('dashboard');
+        if (dashboardEl && typeof renderDataFooter === 'function') {
+            renderDataFooter('dashboard', {
+                source: analysis?.basic_info?.data_source || 'AKShare',
+                timestamp: new Date().toISOString(),
+                adjusted: '后复权',
+            });
+        }
+    } catch (e) { /* non-critical */ }
 }
 
 // Update Analysis Section
@@ -283,43 +419,45 @@ function updateAnalysis(analysis, klineSignals, atrData) {
         // Fundamental - with null checks
         if (analysis.fundamental && analysis.fundamental.valuation) {
             const val = analysis.fundamental.valuation;
-            document.getElementById('fundPe').textContent = (parseFloat(val.pe) || 0).toFixed(2);
-            document.getElementById('fundPeLevel').textContent = val.level || '--';
-            document.getElementById('fundPeLevel').className = 'metric-badge ' +
-                (val.level === '极高' ? 'high' : val.level === '偏高' ? 'medium' : 'low');
-            document.getElementById('fundMarketCap').textContent = (parseFloat(val.market_cap) || 0).toFixed(2);
-            document.getElementById('fundCirculatingCap').textContent = (parseFloat(val.circulating_cap) || 0).toFixed(2);
+            const fundPe = $('fundPe'); if (fundPe) fundPe.textContent = (parseFloat(val.pe) || 0).toFixed(2) + ' 倍';
+            const fundPeStd = $('fundPeStandard'); if (fundPeStd) fundPeStd.textContent = (parseFloat(val.pe_standard) || 0).toFixed(2) + ' 倍';
+            const fundPeLvl = $('fundPeLevel'); if (fundPeLvl) {
+                fundPeLvl.textContent = val.level || '--';
+                const levelClass = val.level === '极高' ? 'high' : val.level === '偏高' ? 'medium' : 'low';
+                fundPeLvl.className = 'fund-level ' + levelClass;  // 保留 fund-level 确保文字颜色正确
+            }
+            const fundMktCap = $('fundMarketCap'); if (fundMktCap) fundMktCap.textContent = (parseFloat(val.market_cap) || 0).toFixed(2) + ' 亿元';
+            const fundCircCap = $('fundCirculatingCap'); if (fundCircCap) fundCircCap.textContent = (parseFloat(val.circulating_cap) || 0).toFixed(2) + ' 亿元';
         }
 
         if (analysis.fundamental && analysis.fundamental.financial_health) {
             const fh = analysis.fundamental.financial_health;
-            document.getElementById('fundRevenueGrowth').textContent = fh.revenue_growth || '--';
-            document.getElementById('fundProfitGrowth').textContent = fh.profit_growth || '--';
-            document.getElementById('fundGrossMargin').textContent = fh.gross_margin || '--';
+            const fundRevGrowth = $('fundRevenueGrowth'); if (fundRevGrowth) fundRevGrowth.textContent = fh.revenue_growth || '--';
+            const fundProfitGrowth = $('fundProfitGrowth'); if (fundProfitGrowth) fundProfitGrowth.textContent = fh.profit_growth || '--';
+            const fundGrossMargin = $('fundGrossMargin'); if (fundGrossMargin) fundGrossMargin.textContent = fh.gross_margin || '--';
         }
 
         // Technical - with null checks
         if (analysis.technical) {
             if (analysis.technical.kline) {
-                document.getElementById('techKlinePattern').textContent = analysis.technical.kline.pattern || '--';
-                document.getElementById('techAmplitude').textContent = '振幅: ' + (parseFloat(analysis.technical.kline.amplitude) || 0).toFixed(2) + '%';
+                const tkp = $('techKlinePattern'); if (tkp) tkp.textContent = analysis.technical.kline.pattern || '--';
+                const ta = $('techAmplitude'); if (ta) ta.textContent = '振幅: ' + (parseFloat(analysis.technical.kline.amplitude) || 0).toFixed(2) + '%';
             }
 
             if (analysis.technical.moving_averages) {
                 const ma = analysis.technical.moving_averages;
-                document.getElementById('ma5').textContent = (parseFloat(ma.ma5) || 0).toFixed(2);
-                document.getElementById('ma10').textContent = (parseFloat(ma.ma10) || 0).toFixed(2);
-                document.getElementById('ma20').textContent = (parseFloat(ma.ma20) || 0).toFixed(2);
-                document.getElementById('ma60').textContent = (parseFloat(ma.ma60) || 0).toFixed(2);
-                document.getElementById('ma120').textContent = (parseFloat(ma.ma120) || 0).toFixed(2);
-                document.getElementById('ma250').textContent = (parseFloat(ma.ma250) || 0).toFixed(2);
+                const ids = ['ma5','ma10','ma20','ma60','ma120','ma250'];
+                ids.forEach((id, i) => {
+                    const el = $(id);
+                    if (el && ma[id]) el.textContent = (parseFloat(ma[id]) || 0).toFixed(2);
+                });
             }
 
             // Support/Resistance
             const supportEl = document.getElementById('supportLevels');
             const resistanceEl = document.getElementById('resistanceLevels');
-            supportEl.innerHTML = '';
-            resistanceEl.innerHTML = '';
+            if (supportEl) supportEl.innerHTML = '';
+            if (resistanceEl) resistanceEl.innerHTML = '';
 
             if (analysis.technical.support_resistance) {
                 if (analysis.technical.support_resistance.supports) {
@@ -360,7 +498,8 @@ function updateAnalysis(analysis, klineSignals, atrData) {
 
             // Flow speed
             if (analysis.fund_flow.flow_speed) {
-                document.getElementById('flowSpeed').textContent = parseFloat(analysis.fund_flow.flow_speed.speed) || '--';
+                const flowSpeedEl = document.getElementById('flowSpeed');
+                if (flowSpeedEl) flowSpeedEl.textContent = parseFloat(analysis.fund_flow.flow_speed.speed) || '--';
             }
 
             // Pressure index
@@ -442,31 +581,31 @@ function updateAnalysis(analysis, klineSignals, atrData) {
                 const smallRatio = dist.small ? dist.small.ratio || 0 : 0;
 
                 // 大单
-                const largeDistEl = document.getElementById('largeDist');
+                const largeDistEl = $('largeDist');
                 if (largeDistEl) {
                     largeDistEl.style.width = largeRatio + '%';
                     const largeFill = largeDistEl.querySelector('.progress-fill');
                     if (largeFill) largeFill.style.width = largeRatio + '%';
                 }
-                document.getElementById('largeValue').textContent = largeRatio + '%';
-                
+                const largeValue = $('largeValue'); if (largeValue) largeValue.textContent = largeRatio + '%';
+
                 // 中单
-                const mediumDistEl = document.getElementById('mediumDist');
+                const mediumDistEl = $('mediumDist');
                 if (mediumDistEl) {
                     mediumDistEl.style.width = mediumRatio + '%';
                     const mediumFill = mediumDistEl.querySelector('.progress-fill');
                     if (mediumFill) mediumFill.style.width = mediumRatio + '%';
                 }
-                document.getElementById('mediumValue').textContent = mediumRatio + '%';
-                
+                const mediumValue = $('mediumValue'); if (mediumValue) mediumValue.textContent = mediumRatio + '%';
+
                 // 小单
-                const smallDistEl = document.getElementById('smallDist');
+                const smallDistEl = $('smallDist');
                 if (smallDistEl) {
                     smallDistEl.style.width = smallRatio + '%';
                     const smallFill = smallDistEl.querySelector('.progress-fill');
                     if (smallFill) smallFill.style.width = smallRatio + '%';
                 }
-                document.getElementById('smallValue').textContent = smallRatio + '%';
+                const smallValue = $('smallValue'); if (smallValue) smallValue.textContent = smallRatio + '%';
                 
                 // 添加动画效果
                 const allBars = document.querySelectorAll('.progress-fill');
@@ -479,30 +618,33 @@ function updateAnalysis(analysis, klineSignals, atrData) {
             if (analysis.fund_flow.chip_distribution) {
                 const chipProfit = analysis.fund_flow.chip_distribution.profit_ratio || 0;
                 const chipTrapped = analysis.fund_flow.chip_distribution.trapped_ratio || 0;
-                document.getElementById('chipProfit').style.width = chipProfit + '%';
-                document.getElementById('chipTrapped').style.width = chipTrapped + '%';
-                document.getElementById('chipProfitValue').textContent = chipProfit + '%';
-                document.getElementById('chipTrappedValue').textContent = chipTrapped + '%';
+                const cp = $('chipProfit'); if (cp) cp.style.width = chipProfit + '%';
+                const ct = $('chipTrapped'); if (ct) ct.style.width = chipTrapped + '%';
+                const cpv = $('chipProfitValue'); if (cpv) cpv.textContent = chipProfit + '%';
+                const ctv = $('chipTrappedValue'); if (ctv) ctv.textContent = chipTrapped + '%';
             }
         }
 
         // Prediction
         if (analysis.prediction) {
             if (analysis.prediction.model) {
-                document.getElementById('compositeScore').textContent = parseFloat(analysis.prediction.model.composite) || '--';
+                const cs = $('compositeScore'); if (cs) cs.textContent = parseFloat(analysis.prediction.model.composite) || '--';
             }
-            document.getElementById('weightedTarget').textContent = (parseFloat(analysis.prediction.weighted_target) || 0) + ' 元';
-            document.getElementById('wtUpside').textContent = '+' + (parseFloat(analysis.prediction.upside_space) || 0) + '%';
+            const wt = $('weightedTarget'); if (wt) wt.textContent = (parseFloat(analysis.prediction.weighted_target) || 0) + ' 元';
+            const wu = $('wtUpside'); if (wu) wu.textContent = '+' + (parseFloat(analysis.prediction.upside_space) || 0) + '%';
 
             // Scenarios
             const scenarios = analysis.prediction.scenarios;
-            if (scenarios && scenarios[0]) document.getElementById('optimisticTarget').textContent = scenarios[0].target_range || '--';
-            if (scenarios && scenarios[1]) document.getElementById('neutralTarget').textContent = scenarios[1].target_range || '--';
-            if (scenarios && scenarios[2]) document.getElementById('pessimisticTarget').textContent = scenarios[2].target_range || '--';
+            if (scenarios && scenarios[0]) { const ot = $('optimisticTarget'); if (ot) ot.textContent = scenarios[0].target_range || '--'; }
+            if (scenarios && scenarios[1]) { const nt = $('neutralTarget'); if (nt) nt.textContent = scenarios[1].target_range || '--'; }
+            if (scenarios && scenarios[2]) { const pt = $('pessimisticTarget'); if (pt) pt.textContent = scenarios[2].target_range || '--'; }
         }
 
         // ML Model Details (Stacking Ensemble)
         updateMLDetails(analysis);
+
+        // SOTA 模型详情
+        updateSOTADetails(analysis);
 
         // K线信号分析
         updateKlineSignals(klineSignals);
@@ -585,6 +727,105 @@ function updateMLDetails(analysis) {
                 `<span class="ml-feature-item">${name}: ${(val * 100).toFixed(1)}%</span>`
             ).join('');
         }
+    }
+}
+
+// Update SOTA Model Details
+function updateSOTADetails(analysis) {
+    const pred = analysis?.prediction;
+    if (!pred) return;
+
+    const sotaModels = pred.sota_models;
+    if (!sotaModels || Object.keys(sotaModels).length === 0) {
+        console.log('[SOTA] No SOTA model data available');
+        return;
+    }
+
+    // SOTA 综合投票
+    const consensus = pred.sota_consensus;
+    const agreement = pred.sota_agreement;
+    const avgConf = pred.sota_avg_confidence;
+
+    const consensusEl = document.getElementById('sotaConsensus');
+    if (consensusEl) {
+        const text = consensus === 'up' ? '📈 看涨' : consensus === 'down' ? '📉 看跌' : '➡️ 中性';
+        consensusEl.textContent = text;
+        consensusEl.className = 'ml-value ' + (consensus === 'up' ? 'bullish' : consensus === 'down' ? 'bearish' : 'neutral');
+    }
+
+    const agreementEl = document.getElementById('sotaAgreement');
+    if (agreementEl) {
+        agreementEl.textContent = (agreement * 100).toFixed(1) + '%';
+    }
+
+    const avgConfEl = document.getElementById('sotaAvgConfidence');
+    if (avgConfEl) {
+        avgConfEl.textContent = (avgConf * 100).toFixed(1) + '%';
+    }
+
+    // 逐个 SOTA 模型详情
+    const modelDetailsEl = document.getElementById('sotaModelDetails');
+    if (modelDetailsEl) {
+        let html = '';
+
+        // PatchTST
+        if (sotaModels.patchtst) {
+            const pt = sotaModels.patchtst;
+            const dir = pt.direction === 'up' ? '📈涨' : '📉跌';
+            html += `<span class="ml-feature-item">PatchTST: ${dir} (${(pt.confidence*100).toFixed(0)}%)</span> `;
+        }
+
+        // Mamba
+        if (sotaModels.mamba) {
+            const mb = sotaModels.mamba;
+            const dir = mb.direction === 'up' ? '📈涨' : '📉跌';
+            html += `<span class="ml-feature-item">Mamba: ${dir} (${(mb.confidence*100).toFixed(0)}%)</span> `;
+        }
+
+        // Diffusion
+        if (sotaModels.diffusion) {
+            const df = sotaModels.diffusion;
+            const dir = df.direction === 'up' ? '📈涨' : '📉跌';
+            html += `<span class="ml-feature-item">Diffusion: ${dir} (${(df.confidence*100).toFixed(0)}%)</span> `;
+        }
+
+        // DRL
+        if (sotaModels.drl) {
+            const dr = sotaModels.drl;
+            html += `<span class="ml-feature-item">DRL: ${dr.action} (${(dr.confidence*100).toFixed(0)}%)</span> `;
+        }
+
+        // Conformal
+        if (sotaModels.conformal) {
+            const cp = sotaModels.conformal;
+            html += `<span class="ml-feature-item">Conformal: [${cp.lower_bound.toFixed(4)}, ${cp.upper_bound.toFixed(4)}]</span> `;
+        }
+
+        // Alpha158
+        if (sotaModels.alpha158 && sotaModels.alpha158.available) {
+            html += `<span class="ml-feature-item">Alpha158: ${sotaModels.alpha158.n_factors} 因子</span> `;
+        }
+
+        // GNN
+        if (sotaModels.gnn) {
+            const gn = sotaModels.gnn;
+            const dir = gn.direction === 'up' ? '📈涨' : '📉跌';
+            html += `<span class="ml-feature-item">GNN: ${dir} (${(gn.confidence*100).toFixed(0)}%)</span> `;
+        }
+
+        // Cross-Market
+        if (sotaModels.cross_market) {
+            const cm = sotaModels.cross_market;
+            html += `<span class="ml-feature-item">Cross-Market: A=${cm.a_share_sentiment} HK=${cm.hk_sentiment} US=${cm.us_sentiment}</span> `;
+        }
+
+        // Sentiment
+        if (sotaModels.sentiment) {
+            const sm = sotaModels.sentiment;
+            html += `<span class="ml-feature-item">Sentiment: ${sm.label} (${(sm.score*100).toFixed(0)}‰)</span> `;
+        }
+
+        modelDetailsEl.innerHTML = html;
     }
 }
 
@@ -867,7 +1108,7 @@ function connectWebSocket() {
 
 function initializeSocket() {
     const stockCode = document.getElementById('stockCode').value || 'sz300620';
-    socket = io('http://localhost:5002', {
+    socket = io('', {
         reconnection: true,
         reconnectionDelay: 1000,
         reconnectionDelayMax: 8000,
@@ -958,129 +1199,36 @@ function updateWebSocketAlerts(anomalies) {
     });
 }
 
-// 热力图功能
-function refreshHeatmap() {
-    fetch('http://localhost:5002/api/heatmap')
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                renderHeatmap(data.data);
-            }
-        })
-        .catch(error => console.error('Error loading heatmap:', error));
-}
-
-function renderHeatmap(heatmap) {
-    const container = document.getElementById('industryHeatmap');
-    container.innerHTML = '';
-    
-    for (const [industry, data] of Object.entries(heatmap)) {
-        const item = document.createElement('div');
-        item.className = `heatmap-item ${data.level}`;
-        
-        let sectorsHtml = '';
-        for (const [sector, sectorData] of Object.entries(data.sectors)) {
-            sectorsHtml += `<div class="heatmap-sector-item" style="background:${sectorData.color}">${sector}: ${sectorData.flow > 0 ? '+' : ''}${sectorData.flow}亿</div>`;
-        }
-        
-        item.innerHTML = `
-            <div class="heatmap-title">${industry}</div>
-            <div class="heatmap-value">${data.total_flow > 0 ? '+' : ''}${data.total_flow.toFixed(1)}亿</div>
-            <div class="heatmap-level">${data.level.replace('_', ' ')}</div>
-            <div class="heatmap-sectors">${sectorsHtml}</div>
-        `;
-        
-        container.appendChild(item);
-    }
-}
-
-// 异动提醒功能
-function refreshAlerts() {
-    const stockCode = document.getElementById('stockCode').value || 'sz300620';
-    fetch(`http://localhost:5002/api/alerts/${stockCode}`)
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                renderAlerts(data.alerts, data.summary);
-            }
-        })
-        .catch(error => console.error('Error loading alerts:', error));
-}
-
-function renderAlerts(alerts, summary) {
-    // 渲染摘要
-    const summaryEl = document.getElementById('alertSummary');
-    if (summaryEl) {
-        summaryEl.innerHTML = `
-            <div class="alert-summary-item">
-                <div class="alert-summary-value">${summary.total_alerts || 0}</div>
-                <div class="alert-summary-label">总异动数</div>
-            </div>
-            <div class="alert-summary-item">
-                <div class="alert-summary-value">${summary.recent_5min || 0}</div>
-                <div class="alert-summary-label">5分钟内</div>
-            </div>
-            <div class="alert-summary-item">
-                <div class="alert-summary-value">${summary.recent_15min || 0}</div>
-                <div class="alert-summary-label">15分钟内</div>
-            </div>
-            <div class="alert-summary-item">
-                <div class="alert-summary-value">${summary.by_severity?.high || 0}</div>
-                <div class="alert-summary-label">高严重度</div>
-            </div>
-        `;
-    }
-    
-    // 渲染历史 - 检查元素是否存在
-    const historyEl = document.getElementById('alertHistory');
-    if (historyEl) {
-        historyEl.innerHTML = '';
-        
-        if (alerts && alerts.length > 0) {
-            alerts.forEach(alert => {
-                const item = document.createElement('div');
-                item.className = `alert-history-item ${alert.severity || 'medium'}`;
-                item.innerHTML = `
-                    <span class="alert-icon">⚠️</span>
-                    <span class="alert-message">${alert.message}</span>
-                    <span class="alert-time">${alert.timestamp}</span>
-                `;
-                historyEl.appendChild(item);
-            });
-        } else {
-            historyEl.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8">暂无异动记录</div>';
-        }
-    }
-}
-
 // 页面加载时初始化
-document.addEventListener('DOMContentLoaded', function() {
-    console.log('DOM loaded, initializing...');
+// 修复: 由于 script 标签在 </body> 之前，DOMContentLoaded 可能在脚本加载前已触发。
+// 使用 document.readyState 检查：如果 'complete' 则立即执行，否则等待事件。
+function initOnReady() {
+    console.log('[initOnReady] DOM ready, initializing...');
 
-    // Auto-fetch stock data on load
-    fetchStockData('sz300620');
+    // 先加载仪表盘数据
+    loadDashboardData();
 
     // Auto-refresh every 60 seconds
     setInterval(() => {
-        const stockCode = document.getElementById('stockCode').value;
+        const stockCode = document.getElementById('stockCode')?.value || 'sz300620';
         fetchStockData(stockCode);
     }, 60000);
 
     // 自动连接 WebSocket
     connectWebSocket();
 
-    // 加载热力图
-    refreshHeatmap();
+    console.log('[initOnReady] Initialization complete');
+}
 
-    // 加载提醒
-    refreshAlerts();
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initOnReady);
+} else {
+    // DOM 已加载完成（script 在 </body> 前），立即执行
+    initOnReady();
+}
 
-    // 告警轮询（每 30 秒）
-    setInterval(refreshAlerts, 30000);
-
-    console.log('Initialization complete');
-
-    // 添加 Pulse 动画样式到文档 head
+// 添加 Pulse 动画样式到文档 head
+(function addPulseStyle() {
     const pulseStyle = document.createElement('style');
     pulseStyle.textContent = `
         @keyframes pulse {
@@ -1099,7 +1247,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     `;
     document.head.appendChild(pulseStyle);
-});
+})();
 
 // ── 资金流向显示更新（WebSocket 实时数据） ──────────────────
 
@@ -1153,7 +1301,7 @@ function updateFundFlowDisplay(data) {
 
 // 资金流向数据刷新
 function refreshFundFlowData(stockCode) {
-    fetch(`http://localhost:5002/api/stock/${stockCode}`)
+    fetch(`/api/stock/${stockCode}`, { headers: _apiHeaders() })
         .then(response => response.json())
         .then(data => {
             if (data.success) {
@@ -1168,7 +1316,7 @@ function refreshFundFlowData(stockCode) {
 function runBacktest() {
     const stockCode = document.getElementById('stockCode').value || 'sz300620';
     showLoading(true);
-    fetch(`http://localhost:5002/api/backtest/report?stock_code=${stockCode}`)
+    fetch(`/api/backtest/report?stock_code=${stockCode}`, { headers: _apiHeaders() })
         .then(r => r.json())
         .then(data => {
             if (data.success) {
@@ -1309,7 +1457,7 @@ function updateBacktestReport(data) {
 function runPortfolioOptimize() {
     const stockCode = document.getElementById('stockCode').value || 'sz300620';
     showLoading(true);
-    fetch(`http://localhost:5002/api/portfolio/optimize?stock_code=${stockCode}`)
+    fetch(`/api/portfolio/optimize?stock_code=${stockCode}`, { headers: _apiHeaders() })
         .then(r => r.json())
         .then(data => {
             if (data.success) {
@@ -1383,7 +1531,7 @@ function updatePortfolioOptimization(data) {
 function runFactorAnalysis() {
     const stockCode = document.getElementById('stockCode').value || 'sz300620';
     showLoading(true);
-    fetch(`http://localhost:5002/api/factors/norm?stock_code=${stockCode}`)
+    fetch(`/api/factors/norm?stock_code=${stockCode}`, { headers: _apiHeaders() })
         .then(r => r.json())
         .then(data => {
             if (data.success) {

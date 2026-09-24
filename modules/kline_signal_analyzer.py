@@ -506,6 +506,27 @@ class KlineSignalAnalyzer:
         return round(total, 1)
 
 
+    def get_klines(self, stock_code: str = 'sz300620', period: str = 'daily', count: int = 120) -> List[Dict]:
+        """
+        获取 K 线数据 — 供 factor_routes 等外部模块使用
+
+        Args:
+            stock_code: 股票代码 (如 'sz300620')
+            period: 周期 ('daily'/'weekly'/'monthly')
+            count: 返回条数
+
+        Returns:
+            K 线数据列表 [{date, open, high, low, close, volume, ...}]
+        """
+        try:
+            from modules.data_fetcher import StockDataFetcher
+            fetcher = StockDataFetcher()
+            return fetcher.get_kline_data(stock_code, period=period, count=count)
+        except Exception as e:
+            logger.error(f"[KlineSignalAnalyzer] get_klines 失败: {e}")
+            return []
+
+
 if __name__ == '__main__':
     analyzer = KlineSignalAnalyzer()
     print("✓ K线信号分析器初始化完成")

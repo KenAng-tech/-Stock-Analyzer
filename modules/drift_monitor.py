@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 """
-概念漂移检测集成模块 — 集成到主系统
+概念漂移检测集成模块 — DEPRECATED
 
-功能:
-1. 封装 ConceptDriftDetector 统一接口
-2. 与 dashboard_api 集成
-3. 自动触发模型重新训练
-4. 实时监控预测误差和特征分布
+⚠️ 已弃用: 请使用 concept_drift_detector.py 中的 DriftConsensusDetector
+此文件保留仅向后兼容，将在 2026-10-01 后删除。
 
-作者: 基于 Bifet & Gavalda (2007)
-参考: modules/concept_drift_detector.py
+新的代码应使用:
+    from modules.concept_drift_detector import DriftConsensusDetector
+    detector = DriftConsensusDetector()
+    result = detector.check_error(0.05)
 """
+
+import warnings
+warnings.warn(
+    "[DEPRECATED] modules.drift_monitor 已弃用，请使用 modules.concept_drift_detector",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 import os
 import pickle
@@ -20,86 +26,10 @@ from typing import Dict, Optional, List, Tuple
 from datetime import datetime
 from collections import deque
 import threading
+from scipy import stats as scipy_stats
 
 from modules.logger import logger
-
-
-# ── ADWIN 实现 ────────────────────────────────────────────────
-
-class ADWIN:
-    """
-    ADWIN (Adaptive Windowing) 漂移检测算法
-
-    核心思想:
-        - 维护一个可变大小的窗口 W
-        - 定期检查 W 是否可以分割为 W0 和 W1，使得 |mean(W0) - mean(W1)| > ε
-        - 如果检测到显著差异，则丢弃 W0 中较老的部分
-        - ε 依赖于 delta (置信度参数) 和 |W0|, |W1|
-
-    参数:
-        delta: 置信度参数 (越小越敏感，默认 0.01)
-        max_window: 最大窗口大小 (默认 1000)
-    """
-
-    def __init__(self, delta: float = 0.01, max_window: int = 1000):
-        self.delta = delta
-        self.max_window = max_window
-        self.window = deque()
-        self._n_splits = 0
-        self._initial_size = 30
-
-    def add(self, value: float) -> bool:
-        """添加观测值，返回是否检测到漂移"""
-        self.window.append(value)
-
-        if len(self.window) > self.max_window:
-            self.window.popleft()
-
-        if len(self.window) < self._initial_size:
-            return False
-
-        return self._check_split()
-
-    def _check_split(self) -> bool:
-        """检查窗口是否可以分割"""
-        n = len(self.window)
-
-        for cut in range(self._initial_size, n - self._initial_size):
-            n0 = cut
-            n1 = n - cut
-
-            if n0 < self._initial_size or n1 < self._initial_size:
-                continue
-
-            mean0 = np.mean(self.window[:cut])
-            mean1 = np.mean(self.window[cut:])
-
-            delta_prime = np.log(4.0 / self.delta)
-            m = (n0 * n1) / (n0 + n1)
-            epsilon = np.sqrt((delta_prime / (2.0 * m)) + (delta_prime / (6.0 * n) * np.log(4.0 / self.delta)))
-
-            if abs(mean0 - mean1) > epsilon:
-                self.window = deque(list(self.window)[cut:])
-                self._n_splits += 1
-                return True
-
-        return False
-
-    @property
-    def n_splits(self) -> int:
-        return self._n_splits
-
-    @property
-    def window_size(self) -> int:
-        return len(self.window)
-
-    @property
-    def window_mean(self) -> float:
-        return float(np.mean(self.window)) if self.window else 0.0
-
-    @property
-    def window_std(self) -> float:
-        return float(np.std(self.window)) if self.window else 0.0
+from modules.adwin import ADWIN
 
 
 # ── 概念漂移检测器 ─────────────────────────────────────────
@@ -142,6 +72,8 @@ class DriftMonitor:
         self._drift_events: List[Dict] = []
         self._last_drift_time: Optional[str] = None
         self._drift_count = 0
+        self._prediction_drift_count = 0
+        self._feature_drift_count = 0
 
         self._lock = threading.Lock()
         self.model_dir = os.path.join(os.path.dirname(__file__), '..', 'models')
@@ -170,15 +102,17 @@ class DriftMonitor:
 
         if drift_detected:
             self._drift_count += 1
+            self._prediction_drift_count += 1
             self._last_drift_time = datetime.now().isoformat()
             self._drift_events.append({
                 'timestamp': self._last_drift_time,
+                'type': 'prediction_drift',
                 'error_mean_before': float(np.mean(list(self.adwin.window)[:len(list(self.adwin.window))//2])) if len(self.adwin.window) > 10 else 0,
                 'error_mean_after': float(np.mean(list(self.adwin.window))) if self.adwin.window else 0,
                 'window_size': self.adwin.window_size,
             })
             logger.warning(
-                f"[DriftMonitor] 概念漂移检测! "
+                f"[DriftMonitor] 预测误差漂移检测! "
                 f"error={error:.4f}, n_splits={self.adwin.n_splits}"
             )
 
@@ -202,22 +136,37 @@ class DriftMonitor:
         if len(X_new.shape) == 1:
             X_new = X_new.reshape(1, -1)
 
-        X_norm = (X_new - self._feature_baseline_stats['mean']) / (self._feature_baseline_stats['std'] + 1e-8)
-
-        # KS 检验 (简化版: 用均值和方差的显著变化检测)
         drift_detected = False
-        for i in range(min(X_norm.shape[1], 12)):  # 检查前 12 维
-            col = X_norm[:, i]
-            if np.abs(np.mean(col)) > 2.0 or np.abs(np.std(col) - 1.0) > 0.3:
-                logger.warning(f"[DriftMonitor] Feature {i} drift detected")
+        drifted_features = []
+
+        for i in range(min(X_new.shape[1], 20)):  # 检查前 20 维
+            col_old = self._baseline_features[:, i]
+            col_new = X_new[:, i]
+
+            # 标准化
+            mean_old = np.mean(col_old)
+            std_old = np.std(col_old) + 1e-8
+            col_old_norm = (col_old - mean_old) / std_old
+            col_new_norm = (col_new - mean_old) / std_old
+
+            # KS 检验
+            ks_stat, ks_pvalue = scipy_stats.ks_2samp(col_old_norm, col_new_norm)
+
+            if ks_pvalue < self.ks_alpha:
                 drift_detected = True
+                drifted_features.append({'feature': i, 'ks_stat': float(ks_stat), 'p_value': float(ks_pvalue)})
+                logger.warning(
+                    f"[DriftMonitor] 特征 {i} 分布漂移 (KS stat={ks_stat:.4f}, p={ks_pvalue:.4f})"
+                )
 
         if drift_detected:
             self._drift_count += 1
+            self._feature_drift_count += 1
             self._last_drift_time = datetime.now().isoformat()
             self._drift_events.append({
                 'timestamp': self._last_drift_time,
                 'type': 'feature_drift',
+                'drifted_features': drifted_features,
                 'feature_stats': {
                     'mean': float(np.mean(X_new)),
                     'std': float(np.std(X_new)),
@@ -245,8 +194,11 @@ class DriftMonitor:
         条件:
             - 漂移检测次数 > 3
             - 或距离上次漂移 > 7 天
+            - 或预测漂移 + 特征漂移 > 5
         """
         if self._drift_count > 3:
+            return True
+        if self._prediction_drift_count + self._feature_drift_count > 5:
             return True
 
         if self._last_drift_time:
@@ -262,6 +214,8 @@ class DriftMonitor:
         return {
             'drift_detected': self._drift_count > 0,
             'drift_count': self._drift_count,
+            'prediction_drift_count': self._prediction_drift_count,
+            'feature_drift_count': self._feature_drift_count,
             'last_drift_time': self._last_drift_time,
             'adwin_window_size': self.adwin.window_size,
             'adwin_n_splits': self.adwin.n_splits,
@@ -272,9 +226,12 @@ class DriftMonitor:
     def reset(self):
         """重置检测器"""
         self._drift_count = 0
+        self._prediction_drift_count = 0
+        self._feature_drift_count = 0
         self._drift_events = []
         self._last_drift_time = None
         self._prediction_errors.clear()
+        self.adwin = ADWIN(delta=self.adwin.delta, max_window=self.adwin.max_window)
         logger.info("[DriftMonitor] 重置完成")
 
     def save(self, path: Optional[str] = None):

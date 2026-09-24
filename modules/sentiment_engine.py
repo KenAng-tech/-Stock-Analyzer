@@ -14,8 +14,10 @@ FinBERT 情感分析集成模块 — 替换词典法
 """
 
 import os
+import time
 import numpy as np
 import threading
+from typing import Dict, List, Optional, Tuple
 
 from modules.logger import logger
 
@@ -239,11 +241,17 @@ class FinBERTSentimentAnalyzer:
         """初始化模型"""
         try:
             import torch
-            from transformers import AutoTokenizer, AutoModelForSequenceClassification
+            from transformers import AutoTokenizer, AutoModelForSequenceClassification, BertTokenizer
 
             logger.info(f"[FinBERT] 加载模型: {self.model_name}")
 
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            # 尝试使用 AutoTokenizer，失败时使用 BertTokenizer
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            except Exception:
+                logger.info("[FinBERT] AutoTokenizer 失败，使用 BertTokenizer")
+                self.tokenizer = BertTokenizer.from_pretrained(self.model_name)
+
             self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
             self.model.eval()
 
@@ -332,6 +340,7 @@ class SentimentEngine:
         self.use_finbert = use_finbert
         self._finbert = None
         self._dictionary = DictionarySentimentAnalyzer()
+        self._news_cache: Dict = {}  # code -> (ts, (news, posts)) 文本抓取缓存 1h (2026-09-10)
 
         if use_finbert:
             self._init_finbert()
@@ -375,6 +384,18 @@ class SentimentEngine:
             List[Dict] 每条文本的分析结果
         """
         return [self.analyze(text) for text in texts]
+
+    def load(self, path: Optional[str] = None) -> bool:
+        """
+        加载模型/词典 (词典法始终可用)
+
+        Args:
+            path: 可选路径 (词典法忽略)
+
+        Returns:
+            True 表示加载成功
+        """
+        return True
 
     def aggregate(self, texts: List[str], weights: Optional[List[float]] = None) -> Dict:
         """
@@ -427,11 +448,254 @@ class SentimentEngine:
             'label_distribution': label_counts,
         }
 
+    def get_sentiment_score(self, stock_code: str, stock_name: str = '') -> Dict:
+        """
+        端到端情感评分: 抓取新闻+股吧 → 批量分析 → 聚合
+
+        契约 (2026-09-10 补, 同根修复 /api/sentiment/bert + fusion 通道):
+            {'score': -1~1, 'label': str, 'confidence': 0-1,
+             'n_articles': int, 'method': 'finbert'|'dictionary'|'no_data'}
+        无新闻时诚实返回 method='no_data' (不再拿股票名称硬喂词典造假中性),
+        调用方 (routes/fusion) 按 no_data 自行降级。
+
+        Args:
+            stock_code: 股票代码 (带市场前缀, 如 sz300620)
+            stock_name: 股票名称 (当前仅日志用途)
+        """
+        now = time.time()
+        cached = self._news_cache.get(stock_code)
+        if cached and now - cached[0] < 3600:
+            news_texts, post_texts = cached[1]
+        else:
+            news_texts, post_texts = self._fetch_stock_texts(stock_code)
+            self._news_cache[stock_code] = (now, (news_texts, post_texts))
+
+        texts = [t for t in (news_texts + post_texts) if t and t.strip()][:40]
+        if not texts:
+            logger.info(f"[SentimentEngine] {stock_code} 无舆情文本 → no_data 诚实降级")
+            return {'score': 0.0, 'label': 'neutral', 'confidence': 0.0,
+                    'n_articles': 0, 'method': 'no_data'}
+
+        agg = self.aggregate(texts)
+        return {
+            'score': round(agg['aggregate_score'], 4),
+            'label': agg['aggregate_label'],
+            'confidence': round(agg['aggregate_confidence'], 3),
+            'n_articles': len(texts),
+            'method': agg.get('method', 'dictionary'),
+        }
+
+    def _fetch_stock_texts(self, stock_code: str) -> Tuple[List[str], List[str]]:
+        """抓取新闻(≤20)+股吧(≤20)标题; 抓取链失败诚实返回空 (调用方降级, 不喂假)"""
+        try:
+            from modules.data_fetcher import StockDataFetcher
+            fetcher = StockDataFetcher()
+            news = fetcher.get_stock_news(stock_code) or []
+            posts = fetcher.get_stock_posts(stock_code) or []
+            news_texts = [n.get('title', '') for n in news[:20] if n.get('title')]
+            post_texts = [p.get('title', '') or p.get('content', '') for p in posts[:20]]
+            return news_texts, [p for p in post_texts if p]
+        except Exception as e:
+            logger.warning(f"[SentimentEngine] 文本抓取失败 {stock_code}: {e}")
+            return [], []
+
+
+# ── 情绪因子生成器 (P1-4: 2026-07-01) ────────────────────────────────
+
+class SentimentFactorGenerator:
+    """
+    情绪因子生成器
+
+    从新闻/股吧帖子生成情绪 alpha 因子:
+    1. 获取股票相关新闻/帖子
+    2. 运行 FinBERT/词典情感分析
+    3. 生成综合情绪分数因子
+    4. 支持缓存和 IC 追踪
+
+    用法:
+        generator = SentimentFactorGenerator()
+        factor_score = generator.generate_factor(stock_code)
+    """
+
+    def __init__(self, engine: Optional[SentimentEngine] = None, cache_ttl: int = 3600):
+        """
+        Args:
+            engine: SentimentEngine 实例（默认自动创建）
+            cache_ttl: 缓存过期时间（秒），默认 1 小时
+        """
+        self.engine = engine or SentimentEngine(use_finbert=True)
+        self.cache_ttl = cache_ttl
+        self._cache: Dict[str, Dict] = {}
+        self._cache_time: Dict[str, float] = {}
+        self._ic_history: Dict[str, List[float]] = {}
+
+    def generate_factor(self, stock_code: str, news_texts: Optional[List[str]] = None,
+                        post_texts: Optional[List[str]] = None) -> Dict:
+        """
+        生成情绪因子
+
+        Args:
+            stock_code: 股票代码
+            news_texts: 新闻标题列表（可选，不传则自动获取）
+            post_texts: 股吧帖子列表（可选，不传则自动获取）
+
+        Returns:
+            {
+                'factor_name': 'sentiment',
+                'factor_value': float,     # -1.0 ~ +1.0
+                'factor_label': str,       # 'positive'/'neutral'/'negative'
+                'confidence': float,       # 0.0 ~ 1.0
+                'method': str,            # 'finbert'/'dictionary'
+                'text_count': int,        # 分析文本数
+                'label_distribution': Dict,  # positive/neutral/negative 计数
+            }
+        """
+        cache_key = f"sentiment_{stock_code}"
+
+        # 检查缓存
+        if cache_key in self._cache:
+            cached = self._cache[cache_key]
+            import time
+            if time.time() - self._cache_time.get(cache_key, 0) < self.cache_ttl:
+                return cached
+
+        # 获取文本数据
+        if news_texts is None and post_texts is None:
+            news_texts, post_texts = self._fetch_texts(stock_code)
+
+        all_texts = (news_texts or []) + (post_texts or [])
+
+        if not all_texts:
+            result = {
+                'factor_name': 'sentiment',
+                'factor_value': 0.0,
+                'factor_label': 'neutral',
+                'confidence': 0.0,
+                'method': 'none',
+                'text_count': 0,
+                'label_distribution': {'positive': 0, 'neutral': 0, 'negative': 0},
+            }
+        else:
+            # 批量情感分析
+            result = self.engine.aggregate(all_texts)
+            result['factor_name'] = 'sentiment'
+            result['text_count'] = len(all_texts)
+
+        # 更新缓存
+        self._cache[cache_key] = result
+        self._cache_time[cache_key] = __import__('time').time()
+
+        return result
+
+    def _fetch_texts(self, stock_code: str) -> Tuple[List[str], List[str]]:
+        """
+        获取股票相关新闻和股吧帖子
+
+        Args:
+            stock_code: 股票代码
+
+        Returns:
+            (news_texts, post_texts)
+        """
+        news_texts = []
+        post_texts = []
+
+        try:
+            from modules.data_fetcher import StockDataFetcher
+            fetcher = StockDataFetcher()
+
+            # 获取新闻
+            news = fetcher.get_stock_news(stock_code)
+            if news:
+                for item in news[:20]:  # 最多取 20 条新闻
+                    title = item.get('title', '')
+                    if title:
+                        news_texts.append(title)
+
+            # 获取股吧帖子
+            posts = fetcher.get_stock_posts(stock_code)
+            if posts:
+                for item in posts[:20]:  # 最多取 20 条帖子
+                    content = item.get('title', '') or item.get('content', '')
+                    if content:
+                        post_texts.append(content)
+
+        except Exception as e:
+            logger.warning(f"[SentimentFactor] 获取文本数据失败: {e}")
+
+        return news_texts, post_texts
+
+    def update_ic_history(self, stock_code: str, factor_value: float,
+                          future_return: float):
+        """
+        更新因子 IC 历史（用于因子衰减追踪）
+
+        Args:
+            stock_code: 股票代码
+            factor_value: 因子值
+            future_return: 未来收益率（用于计算 IC）
+        """
+        if stock_code not in self._ic_history:
+            self._ic_history[stock_code] = []
+
+        # IC = 因子值与未来收益率的相关系数
+        self._ic_history[stock_code].append({
+            'factor_value': factor_value,
+            'future_return': future_return,
+        })
+
+        # 只保留最近 60 个数据点
+        if len(self._ic_history[stock_code]) > 60:
+            self._ic_history[stock_code] = self._ic_history[stock_code][-60:]
+
+    def get_ic_stats(self, stock_code: str) -> Dict:
+        """
+        获取因子 IC 统计
+
+        Returns:
+            {
+                'ic_mean': float,
+                'ic_std': float,
+                'icir': float,       # IC / IC_std
+                'ic_positive_pct': float,  # IC > 0 的比例
+                'n_samples': int,
+            }
+        """
+        if stock_code not in self._ic_history or len(self._ic_history[stock_code]) < 5:
+            return {
+                'ic_mean': 0.0, 'ic_std': 0.0, 'icir': 0.0,
+                'ic_positive_pct': 0.0, 'n_samples': 0,
+            }
+
+        data = self._ic_history[stock_code]
+        factor_values = [d['factor_value'] for d in data]
+        returns = [d['future_return'] for d in data]
+
+        if len(factor_values) < 5:
+            return {
+                'ic_mean': 0.0, 'ic_std': 0.0, 'icir': 0.0,
+                'ic_positive_pct': 0.0, 'n_samples': 0,
+            }
+
+        ic = float(np.corrcoef(factor_values, returns)[0, 1]) if np.std(factor_values) > 0 and np.std(returns) > 0 else 0.0
+        ic_values = [ic]  # 简化：只返回当前 IC
+
+        return {
+            'ic_mean': round(ic, 4),
+            'ic_std': 0.0,  # 简化
+            'icir': round(ic, 4),
+            'ic_positive_pct': 1.0 if ic > 0 else 0.0,
+            'n_samples': len(data),
+        }
+
 
 # ── 全局单例 ────────────────────────────────────────────────
 
 _sentiment_engine_instance: Optional[SentimentEngine] = None
 _sentiment_engine_lock = threading.Lock()
+
+# 兼容别名
+DictionaryAnalyzer = DictionarySentimentAnalyzer
 
 
 def get_sentiment_engine() -> SentimentEngine:

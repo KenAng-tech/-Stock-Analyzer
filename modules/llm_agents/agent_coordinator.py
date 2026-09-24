@@ -17,6 +17,7 @@ SOTA Reference:
 """
 
 import json
+import threading
 import time
 import numpy as np
 from typing import Dict, List, Optional
@@ -28,6 +29,7 @@ from modules.llm_agents.analyst_team import AnalystTeam
 from modules.llm_agents.research_team import ResearchTeam
 from modules.llm_agents.trader_agent import TraderAgent
 from modules.llm_agents.risk_manager import RiskManager
+from modules.llm_agents.analyst_team import AnalystInsight
 from modules.llm_agents.portfolio_manager import PortfolioManager
 
 
@@ -65,15 +67,27 @@ class AgentDecision:
 class AgentCoordinator:
     """Agent 协调器 - 完整的决策流水线"""
 
-    # 全局超时: 35 秒 (本地 OMLX 并行 ~28s, 留余量)
-    GLOBAL_TIMEOUT = 35.0
+    # 全局超时: 25→75→115→180 秒 (2026-09-09 三轮预算重设计:
+    # ① 25→75: 热态 45-69s 恒截断, 辩论链从未完整跑完;
+    # ② 75→115: max_tokens 2048→512 (生成时间减半);
+    # ③ 115→180: 实测 8080 每调用固定开销 ~15s (TTFT, 5 模型驻留显存争用) +
+    #    enable_thinking=false 后短输出 ~17s/调用。完整链 (第2+次): analyst 40
+    #    (4 并行 sem2 两批) + 辩论 51 (3 串行) + 尾部 4×17 = 68 ≈ 159s, 180 含余量)
+    GLOBAL_TIMEOUT = 180.0
+
+    def _check_timeout(self, start_time: float) -> bool:
+        """检查是否超时，超时则抛出异常终止执行"""
+        elapsed = time.time() - start_time
+        if elapsed > self.GLOBAL_TIMEOUT:
+            raise TimeoutError(f"AgentCoordinator 超时 ({elapsed:.0f}s > {self.GLOBAL_TIMEOUT}s)")
+        return elapsed
 
     def __init__(self, llm_client: LLMClient, config: Dict = None):
         self.llm = llm_client
         self.config = config or {}
 
         # 初始化所有 Agent
-        self.analyst_team = AnalystTeam(llm_client, timeout=25.0)  # 分析师 25s 超时
+        self.analyst_team = AnalystTeam(llm_client, timeout=12.0)  # 分析师 12s 超时
         self.research_team = ResearchTeam(llm_client)
         self.trader_agent = TraderAgent(llm_client)
         self.risk_manager = RiskManager(llm_client, config)
@@ -106,14 +120,65 @@ class AgentCoordinator:
                 self._rule_analyst = RuleEngine()
                 use_rule_analysts = True  # 首次调用也使用规则
 
+            # 如果 LLM 上次调用超时 (>50s)，切换到规则引擎 (2026-09-09: 15→50 —
+            # 8080 实测每调用 TTFT ~15s + decode, 单调用 ~17s; 15s 阈值使第 2+ 次
+            # 调用恒降级规则引擎, LLM 分析师永不参与)
+            if not use_rule_analysts and hasattr(self, '_last_llm_elapsed') and self._last_llm_elapsed > 50.0:
+                logger.info(f"[AgentCoordinator] LLM 上次耗时 {self._last_llm_elapsed:.0f}s，切换到规则引擎")
+                use_rule_analysts = True
+
+            # 如果超过 50 秒，强制切换到规则引擎 (2026-09-09: 20→50 随 GLOBAL_TIMEOUT 缩放)
+            if not use_rule_analysts:
+                elapsed = self._check_timeout(start_time)
+                if elapsed > 50.0:
+                    logger.warning(f"[AgentCoordinator] 已耗时 {elapsed:.0f}s，强制切换到规则引擎")
+                    use_rule_analysts = True
+
             if use_rule_analysts:
                 logger.info("[AgentCoordinator] 使用规则引擎分析师 (LLM 超时保护)")
                 analyst_insights = self._get_rule_insights(stock_data)
             else:
-                analyst_insights = self.analyst_team.analyze(stock_data)
+                # 使用线程包装分析师团队调用，强制 40 秒超时
+                analyst_insights = [None]
+                analyst_error = [None]
+                analyst_done = threading.Event()
+
+                def _run_analysts():
+                    try:
+                        analyst_insights[0] = self.analyst_team.analyze(stock_data)
+                    except Exception as e:
+                        analyst_error[0] = e
+                    finally:
+                        analyst_done.set()
+
+                analyst_thread = threading.Thread(target=_run_analysts, daemon=True)
+                analyst_thread.start()
+                analyst_done.wait(timeout=40.0)  # 2026-09-09: 15→25→40 (4 分析师并行但
+                                                # llm_client Semaphore(2) → 2 批 × ~17-20s)
+
+                if analyst_thread.is_alive():
+                    logger.warning("[AgentCoordinator] 分析师团队 40 秒超时，切换到规则引擎")
+                    self._rule_analyst = RuleEngine()
+                    use_rule_analysts = True
+                    analyst_insights = self._get_rule_insights(stock_data)
+                elif analyst_error[0]:
+                    logger.warning(f"[AgentCoordinator] 分析师团队异常: {analyst_error[0]}，切换到规则引擎")
+                    self._rule_analyst = RuleEngine()
+                    use_rule_analysts = True
+                    analyst_insights = self._get_rule_insights(stock_data)
+
+            # 2026-09-10 断链修复: 线程包装器成功路径 analyst_insights 恒为 [[...]]
+            # 双层嵌套 (初值 [None] + 线程内 [0]=List) → get_summary 内 i=list →
+            # 'list' has no attribute 'direction' 恒炸 → 决策链 LLM 分析师分支从未
+            # 真正跑通过 (每次降级到 neutral 0.3 占位)。解包后 get_summary 才吃得到真洞察。
+            if isinstance(analyst_insights, list) and len(analyst_insights) == 1 \
+                    and isinstance(analyst_insights[0], list):
+                analyst_insights = analyst_insights[0]
 
             consensus = self.analyst_team.get_summary(analyst_insights)
             elapsed = time.time() - start_time
+            # 记录 LLM 耗时，供下次调用判断是否降级到规则引擎
+            self._last_llm_elapsed = elapsed
             logger.info(f"[AgentCoordinator] 共识: {consensus['consensus']}, 置信度: {consensus['avg_confidence']} (耗时: {elapsed:.0f}s)")
 
             # 全局超时检查
@@ -136,42 +201,49 @@ class AgentCoordinator:
                     'reasoning': '分析师团队高度一致',
                 }
             else:
-                # 阶段 2: 研究团队辩论 (增强版)
-                logger.info("[AgentCoordinator] 阶段 2: 研究团队辩论")
+                # 阶段 2: 研究团队辩论 (2026-09-09 重设计: 串行 4 轮 → bull/bear+合成 3 调用, 60s 硬上限)
+                # - counter_bull/counter_bear 是死计算: 结果从未被 synthesize 消费，纯烧 42s×2 时延 → 删除
+                # - bull→bear→synthesize 串行跑在 daemon 线程，主线程 join(60s) — 超时诚实降级
+                #   分析师共识，不再拖死尾部 4 阶段 (旧设计 4 轮辩论 168s 恒超时 → 恒降级)
+                logger.info("[AgentCoordinator] 阶段 2: 研究团队辩论 (Bull→Bear→Synthesize)")
                 debate_start = time.time()
-                if time.time() - start_time > self.GLOBAL_TIMEOUT * 0.5:
-                    logger.warning("[AgentCoordinator] 辩论超时，跳过研究团队")
-                    research_conclusion = {
-                        'final_direction': consensus['consensus'],
-                        'recommendation': 'hold',
-                        'confidence': consensus['avg_confidence'] * 0.8,
-                        'reasoning': '辩论超时，直接使用分析师共识',
-                    }
-                else:
-                    bull_debate = self.research_team.bull_researcher.research(consensus, analyst_insights)
-                    bear_debate = self.research_team.bear_researcher.research(consensus, analyst_insights)
+                debate_out = [None]
+                debate_error = [None]
 
-                    # 增强: 引入反驳轮次
-                    counter_bull = self.research_team.bull_researcher.research(
-                        {'final_direction': 'bearish', 'recommendation': 'sell'},
-                        analyst_insights,
-                    )
-                    counter_bear = self.research_team.bear_researcher.research(
-                        {'final_direction': 'bullish', 'recommendation': 'buy'},
-                        analyst_insights,
-                    )
+                def _run_debate():
+                    try:
+                        bull = self.research_team.bull_researcher.research(consensus, analyst_insights)
+                        bear = self.research_team.bear_researcher.research(consensus, analyst_insights)
+                        debate_out[0] = self.research_team.research_manager.synthesize(bull, bear)
+                    except Exception as e:
+                        debate_error[0] = e
 
-                    research_conclusion = self.research_team.research_manager.synthesize(
-                        bull_debate, bear_debate,
-                    )
+                debate_thread = threading.Thread(target=_run_debate, daemon=True)
+                debate_thread.start()
+                debate_thread.join(timeout=60.0)  # 3×~17s + 排队余量; 饱和时熔断器快速失败
+
+                if debate_out[0]:
+                    research_conclusion = debate_out[0]
                     logger.info(
                         f"[AgentCoordinator] 研究结论: {research_conclusion['final_direction']}, "
                         f"推荐: {research_conclusion['recommendation']} "
                         f"(辩论耗时: {time.time() - debate_start:.0f}s)"
                     )
+                else:
+                    if debate_error[0]:
+                        logger.warning(f"[AgentCoordinator] 辩论链异常: {debate_error[0]}，使用分析师共识")
+                    else:
+                        logger.warning("[AgentCoordinator] 辩论超 60s/无结果，使用分析师共识")
+                    research_conclusion = {
+                        'final_direction': consensus['consensus'],
+                        'recommendation': 'execute',
+                        'confidence': consensus['avg_confidence'],
+                        'reasoning': '辩论超时，使用分析师共识',
+                    }
 
             # 阶段 3: 交易代理决策
             logger.info("[AgentCoordinator] 阶段 3: 交易代理决策")
+            self._check_timeout(start_time)  # LLM 调用前检查
             trade_decision = self.trader_agent.make_decision(research_conclusion, stock_data)
             logger.info(
                 f"[AgentCoordinator] 交易决策: {trade_decision.action}, "
@@ -180,6 +252,7 @@ class AgentCoordinator:
 
             # 阶段 4: 风险管理
             logger.info("[AgentCoordinator] 阶段 4: 风险管理")
+            self._check_timeout(start_time)  # LLM 调用前检查
             risk_assessment = self.risk_manager.assess_risk(
                 {"action": trade_decision.action, "quantity": trade_decision.quantity,
                  "price_target": trade_decision.price_target,
@@ -190,6 +263,7 @@ class AgentCoordinator:
 
             # 阶段 5: 投资组合管理
             logger.info("[AgentCoordinator] 阶段 5: 投资组合管理")
+            self._check_timeout(start_time)  # LLM 调用前检查
             portfolio_decision = self.portfolio_manager.make_decision(
                 [{"stock_name": stock_data.get("name", ""), "action": trade_decision.action,
                   "quantity": trade_decision.quantity}],

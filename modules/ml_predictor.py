@@ -27,12 +27,14 @@ Level-1: Ridge 元学习器 (meta-learner)
 """
 
 import hashlib
+import json
+import os
+import subprocess
+import sys
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
-import json
-import os
 import pickle
 import threading
 import time
@@ -106,10 +108,20 @@ class GRUModel:
             self.device = torch.device('cpu')  # 单股预测不需要 GPU
 
             # ── 构建 GRU 网络 ──
-            self.rnn = nn.Sequential(
-                nn.GRU(input_dim, hidden_dim, batch_first=True, dropout=dropout),
-                nn.GRU(hidden_dim, hidden_dim // 2, batch_first=True, dropout=0.2),
-            )
+            # 使用自定义模块连接两个 GRU（nn.GRU 返回 (output, hidden) 元组，
+            # nn.Sequential 会直接把元组传给下一层导致 'tuple' object has no attribute 'dim'）
+            class _DoubleGRU(nn.Module):
+                def __init__(self, dim1, hidden1, dim2, hidden2, dropout):
+                    super().__init__()
+                    self.gru1 = nn.GRU(dim1, hidden1, batch_first=True, dropout=dropout)
+                    self.gru2 = nn.GRU(hidden1, hidden2, batch_first=True, dropout=0.2)
+
+                def forward(self, x):
+                    out, _ = self.gru1(x)
+                    out, _ = self.gru2(out)
+                    return out
+
+            self.rnn = _DoubleGRU(input_dim, hidden_dim, hidden_dim // 2, hidden_dim // 2, dropout)
             self.fc = nn.Sequential(
                 nn.Linear(hidden_dim // 2, 8),
                 nn.ReLU(),
@@ -179,7 +191,7 @@ class GRUModel:
 
             for batch_X, batch_y in loader:
                 self.optimizer.zero_grad()
-                rnn_out, _ = self.rnn(batch_X)  # (B, T, H)
+                rnn_out = self.rnn(batch_X)  # _DoubleGRU 只返回 output (B, T, H)
                 output = self.fc(rnn_out[:, -1, :])  # 取最后一步
                 loss = self.criterion(output, batch_y)
                 loss.backward()
@@ -259,7 +271,7 @@ class GRUModel:
         self.rnn.eval()
         self.fc.eval()
         with self._torch.no_grad():
-            rnn_out, _ = self.rnn(X_tensor)
+            rnn_out = self.rnn(X_tensor)
             logits = self.fc(rnn_out[:, -1, :])
             probs = self._prepare_fn(logits, dim=1)
 
@@ -343,13 +355,208 @@ class GRUModel:
         return model
 
 
-class MLPredictor:
+# ── 原生模型包装器（从 JSON 加载，提供 predict_proba 接口） ──
+
+class _LightGBMWrapper:
+    """LightGBM Booster 包装器，提供 sklearn 兼容的 predict_proba 接口"""
+
+    def __init__(self, booster):
+        self._booster = booster
+
+    def predict_proba(self, X):
+        """返回形状为 (n_samples, n_classes) 的概率矩阵"""
+        probs = self._booster.predict(X)
+        # LightGBM 输出单值概率 P(up)，需要转换为 3 类概率
+        # 假设: P(up) = probs, P(neutral) = 1 - probs, P(down) = 0
+        # 更合理的做法: 使用多个 Booster 分别预测每类
+        n = X.shape[0] if hasattr(X, 'shape') else len(X)
+        # 简化: 将单值概率扩展为 3 类
+        # prob[0]=down, prob[1]=neutral, prob[2]=up
+        result = np.zeros((n, 3))
+        probs_arr = np.array(probs).reshape(-1)
+        result[:, 2] = probs_arr  # up
+        result[:, 1] = 1.0 - probs_arr  # neutral
+        result[:, 0] = 0.0  # down
+        # 归一化
+        row_sums = result.sum(axis=1, keepdims=True)
+        row_sums = np.where(row_sums == 0, 1, row_sums)
+        result = result / row_sums
+        return result
+
+    def predict(self, X):
+        """返回预测类别 [0, 1, 2] = [down, neutral, up]"""
+        proba = self.predict_proba(X)
+        return proba.argmax(axis=1)
+
+
+class _XGBoostWrapper:
+    """XGBoost Booster 包装器，提供 sklearn 兼容的 predict_proba 接口"""
+
+    def __init__(self, booster):
+        self._booster = booster
+
+    def predict_proba(self, X):
+        """返回形状为 (n_samples, n_classes) 的概率矩阵"""
+        import xgboost as xgb
+        dmatrix = xgb.DMatrix(X)
+        probs = self._booster.predict(dmatrix)
+        # XGBoost 多分类输出形状为 (n_samples, n_classes)
+        if probs.ndim == 2 and probs.shape[1] >= 3:
+            # 已经是多类概率: prob[0]=down, prob[1]=neutral, prob[2]=up
+            return probs
+        # 二分类或单值: 扩展为 3 类
+        n = X.shape[0] if hasattr(X, 'shape') else len(X)
+        result = np.zeros((n, 3))
+        probs_arr = np.array(probs).reshape(-1)
+        result[:, 2] = probs_arr  # up
+        result[:, 1] = 1.0 - probs_arr  # neutral
+        result[:, 0] = 0.0  # down
+        row_sums = result.sum(axis=1, keepdims=True)
+        row_sums = np.where(row_sums == 0, 1, row_sums)
+        result = result / row_sums
+        return result
+
+    def predict(self, X):
+        """返回预测类别"""
+        proba = self.predict_proba(X)
+        return proba.argmax(axis=1)
+
+
+class MLPredictorEnsembleMixin:
     """
-    机器学习预测引擎 — Stacking 集成
+    MLPredictor 集成学习 Mixin
+
+    提供 Temporal Stacking + BMA 混合集成预测功能。
+    作为 MLPredictor 的扩展，不修改原有 stacking 逻辑。
+    """
+
+    def train_ensemble(self, X: np.ndarray, y: np.ndarray,
+                       dates: Optional[List[str]] = None) -> bool:
+        """
+        训练混合集成 (Temporal Stacking + BMA)
+
+        在已有 stacking 模型基础上，训练集成学习器。
+        使用 Level-0 模型的 OOF 预测作为 Level-1 输入。
+
+        Args:
+            X: 特征矩阵
+            y: 标签数组
+            dates: 日期列表
+
+        Returns:
+            是否训练成功
+        """
+        try:
+            from modules.ensemble_learning import HybridEnsemble
+
+            if not self.is_trained or not self.models:
+                logger.warning("[Ensemble] 基础模型未训练，无法训练集成")
+                return False
+
+            # 使用已有的 OOF 预测 (如果存在)
+            if self.oof_predictions is None:
+                logger.warning("[Ensemble] 无 OOF 预测，使用当前模型重新生成")
+                return False
+
+            # 生成 Level-0 预测 (简化: 用 OOF 预测)
+            level0_preds = {}
+            model_names = list(self.models.keys())
+
+            for col_idx, name in enumerate(model_names):
+                if col_idx < self.oof_predictions.shape[1]:
+                    level0_preds[name] = self.oof_predictions[:, col_idx]
+
+            if len(level0_preds) < 2:
+                logger.warning("[Ensemble] 模型数量不足，至少需要 2 个")
+                return False
+
+            # 训练混合集成
+            self._hybrid_ensemble = HybridEnsemble(n_lags=3, temperature=1.0)
+            self._hybrid_ensemble.train(level0_preds, y, model_names)
+            logger.info(f"[Ensemble] 混合集成训练完成: {len(model_names)} 模型")
+            return True
+
+        except ImportError:
+            logger.warning("[Ensemble] ensemble_learning 模块未找到")
+            return False
+        except Exception as e:
+            logger.error(f"[Ensemble] 训练失败: {e}")
+            return False
+
+    def predict_ensemble(self, features: np.ndarray) -> Dict:
+        """
+        使用混合集成预测
+
+        Args:
+            features: 特征数组
+
+        Returns:
+            预测结果字典
+        """
+        try:
+            if not hasattr(self, '_hybrid_ensemble') or self._hybrid_ensemble is None:
+                logger.warning("[Ensemble] 集成模型未训练，使用基础预测")
+                return self.predict_direction(features)
+
+            # 获取各模型的最新预测
+            level0_preds = {}
+            feat = features.reshape(1, -1) if features.ndim == 1 else features
+
+            for name, model in self.models.items():
+                try:
+                    if hasattr(model, 'predict_proba'):
+                        proba = model.predict_proba(feat)[0]
+                        # 取 up 类概率
+                        if len(proba) >= 3:
+                            level0_preds[name] = proba[2]  # up
+                        elif len(proba) >= 2:
+                            level0_preds[name] = proba[-1]  # up
+                    elif hasattr(model, 'predict'):
+                        pred = model.predict(feat)[0]
+                        level0_preds[name] = float(pred) / 2 + 0.5  # 映射到 [0,1]
+                except Exception:
+                    continue
+
+            if len(level0_preds) < 2:
+                logger.warning("[Ensemble] 可用模型不足，使用基础预测")
+                return self.predict_direction(features)
+
+            result = self._hybrid_ensemble.predict(level0_preds)
+            return result.to_dict()
+
+        except Exception as e:
+            logger.error(f"[Ensemble] 预测失败: {e}")
+            return self.predict_direction(features)
+
+    def get_ensemble_report(self) -> Dict:
+        """获取集成学习报告"""
+        try:
+            if not hasattr(self, '_hybrid_ensemble'):
+                return {'trained': False}
+
+            ensemble = self._hybrid_ensemble
+            return {
+                'trained': True,
+                'bma': ensemble.bma.get_summary(),
+                'temporal': {
+                    'is_trained': ensemble.temporal.is_trained,
+                    'n_lags': ensemble.temporal.n_lags,
+                    'model_names': ensemble.temporal.model_names,
+                },
+            }
+        except Exception as e:
+            logger.error(f"[Ensemble] 报告生成失败: {e}")
+            return {'trained': False, 'error': str(e)}
+
+
+class MLPredictor(MLPredictorEnsembleMixin):
+    """
+    机器学习预测引擎 — Stacking 集成 + 混合集成 (Temporal Stacking + BMA)
 
     架构:
-      Level-0: LightGBM + XGBoost + RandomForest (异模型)
+      Level-0: LightGBM + XGBoost + RandomForest + GRU (异模型)
       Level-1: Ridge 回归 (meta-learner)
+      混合集成: Temporal Stacking + Bayesian Model Averaging
 
     训练流程:
       1. Purged K-Fold CV 评估各 Level-0 模型
@@ -362,6 +569,10 @@ class MLPredictor:
     def __init__(self):
         self.models = {}                # Level-0 模型 {name: model}
         self.meta_learner = None        # Level-1 Ridge
+        # 2026-09-08: 调参结果注入点 (HyperParamOrchestrator.apply_to_predictor 写入,
+        # 模型工厂与子进程 trainer 脚本合并消费) + 推理侧利润阈值 gating 阈值
+        self.custom_params = {}         # {model_name: tuned_params}
+        self.signal_margin_gate = 0.10  # 赢家与次高概率差 < 此值 → 降级 neutral
         self.feature_names = [
             'momentum_1d', 'momentum_3d', 'momentum_5d', 'momentum_10d',
             'volume_ratio', 'volatility', 'rsi', 'macd_histogram',
@@ -383,6 +594,46 @@ class MLPredictor:
         self.feature_importances: Dict[str, float] = {}
         self.oof_predictions: Optional[np.ndarray] = None  # OOF 预测 (n, n_levels)
         self.training_dates: Optional[List[str]] = None    # 训练日期索引
+
+        # 服务器启动时恢复训练状态（从元数据 JSON，不加载模型对象避免 SIGSEGV）
+        self._restore_state_from_disk()
+
+    def _restore_state_from_disk(self):
+        """从磁盘元数据 JSON 恢复训练状态（不加载模型对象，避免 C 扩展 SIGSEGV）"""
+        try:
+            if not os.path.isdir(self.model_dir):
+                return
+
+            # 查找最新的 model_meta_*.json
+            meta_files = [
+                f for f in os.listdir(self.model_dir)
+                if f.startswith('model_meta_') and f.endswith('.json')
+            ]
+            if not meta_files:
+                return
+
+            latest_meta = sorted(meta_files)[-1]
+            meta_path = os.path.join(self.model_dir, latest_meta)
+
+            with open(meta_path, 'r') as f:
+                meta = json.load(f)
+
+            if meta.get('is_trained'):
+                self.is_trained = True
+                self.cv_score = meta.get('cv_score', 0.0)
+                self._trained_at = meta.get('trained_at')
+
+                # 恢复特征重要性
+                fi = meta.get('feature_importances', {})
+                if fi:
+                    self.feature_importances = fi
+
+                logger.info(
+                    f"[MLPredictor] 从磁盘恢复训练状态: cv_score={self.cv_score:.4f}, "
+                    f"trained_at={self._trained_at}, models=rf+lgb+xgb"
+                )
+        except Exception as e:
+            logger.warning(f"[MLPredictor] 从磁盘恢复训练状态失败: {e}")
 
     # ── 特征工程 ──────────────────────────────────────────────
 
@@ -551,31 +802,40 @@ class MLPredictor:
     @staticmethod
     def _ema(data: np.ndarray, period: int) -> float:
         """计算 EMA 最后一个值（委托给共享工具）"""
-        from modules.utils.technical import ema as _ema
+        from modules.technical import ema as _ema
         return _ema(data, period)
 
     @staticmethod
     def _ema_array(data: np.ndarray, period: int) -> np.ndarray:
         """计算完整 EMA 数组（委托给共享工具）"""
-        from modules.utils.technical import ema_array as _ema_arr
+        from modules.technical import ema_array as _ema_arr
         return _ema_arr(data, period)
 
     # ── 标签创建（修复前视偏差） ──────────────────────────────
 
     def create_labels(self, klines: List[Dict], horizon: int = 5) -> np.ndarray:
-        """创建标签（考虑交易成本 + 动态阈值，修复前视偏差）"""
-        if len(klines) < horizon + 21:  # 至少需要20日历史计算波动率
+        """创建标签（考虑交易成本 + 动态阈值，修复前视偏差）
+
+        使用 1 年滚动窗口（252 个交易日）计算每个样本的波动率阈值。
+        对样本 i，只使用 returns[0:i] 的历史数据，确保无前视偏差。
+        """
+        if len(klines) < horizon + 252:  # 至少需要1年历史数据
             return np.array([])
 
         closes = np.array([k['close'] for k in klines], dtype=float)
         returns = np.diff(np.log(closes))
 
-        # 基于近期波动率的动态阈值（替代固定 2%）
-        rolling_vol = np.std(returns[-20:]) * np.sqrt(20)  # 20日年化波动率
-        base_threshold = max(0.005, rolling_vol * 0.5)     # 至少 0.5%，或波动率的一半
-
         labels = []
         for i in range(len(closes) - horizon):
+            # 使用截至当天 i 的1年滚动窗口计算波动率（无前视偏差）
+            vol_start = max(0, i - 252)  # 1年 = 252个交易日
+            window_returns = returns[vol_start:i]
+            if len(window_returns) < 20:  # 最少20天数据
+                base_threshold = 0.005
+            else:
+                rolling_vol = np.std(window_returns) * np.sqrt(252)  # 年化波动率
+                base_threshold = max(0.005, rolling_vol * 0.5)
+
             future_return = (closes[i + horizon] - closes[i]) / closes[i]
             # 净收益 = 毛收益 - 交易成本（买入 + 卖出）
             net_return = future_return - self.transaction_cost
@@ -784,6 +1044,7 @@ class MLPredictor:
             'gru': self._make_gru(),
         }
         level0_models = {k: v for k, v in raw_models.items() if v is not None}
+        logger.info(f"[MLPredictor] 可用模型: {list(level0_models.keys())}")
 
         if not level0_models:
             print("[MLPredictor] 所有模型均不可用（sklearn/lightgbm/xgboost 未安装）")
@@ -839,16 +1100,22 @@ class MLPredictor:
 
                         model.fit(X_seq_train, y_train_seq, X_seq_test, y_test_seq)
 
-                        # OOF 预测: 使用 "up" 类概率 (class 0) 作为连续信号
+                        # OOF 预测: 使用 "up" 类概率 (class 2) 作为连续信号
+                        # GRU 用原始 labels [-1,0,1] 训练: class 0=down, 1=neutral, 2=up
                         gru_proba = model.predict_proba(X_seq_test)
-                        oof_preds[test_idx, col_idx] = gru_proba[:, 0]  # up 概率
+                        oof_preds[test_idx, col_idx] = gru_proba[:, 2]  # up 概率
 
                         if len(y_test) >= 5:
                             ic = self.calculate_ic(oof_preds[test_idx, col_idx], y_test)
                             ic_per_fold[name].append(ic)
                     else:
-                        model.fit(X_train, y_train)
-                        oof_preds[test_idx, col_idx] = model.predict(X_test)
+                        # 标签映射: [-1, 0, 1] → [0, 1, 2]（兼容 XGBoost/sklearn）
+                        y_train_mapped = self._remap_labels(y_train)
+                        y_test_mapped = self._remap_labels(y_test)
+                        model.fit(X_train, y_train_mapped)
+                        preds_mapped = model.predict(X_test)
+                        # 映射回 [-1, 0, 1]
+                        oof_preds[test_idx, col_idx] = self._unmap_labels(preds_mapped)
 
                         if len(y_test) >= 5:
                             ic = self.calculate_ic(oof_preds[test_idx, col_idx], y_test)
@@ -899,17 +1166,18 @@ class MLPredictor:
                     model.fit(X_seq_all, y_full_seq)
                 elif incremental and name == 'lgb' and 'lgb' in self.models:
                     # 增量学习: 用已有 LightGBM 模型作为初始模型
+                    y_mapped = self._remap_labels(y)
                     init_model_path = self._save_lightgbm_temp(model)
                     new_model = self._make_lightgbm()
                     if new_model:
-                        new_model.fit(X, y, init_model=init_model_path)
+                        new_model.fit(X, y_mapped, init_model=init_model_path)
                         self.models[name] = new_model
                         os.remove(init_model_path)
                     else:
-                        model.fit(X, y)
+                        model.fit(X, y_mapped)
                         self.models[name] = model
                 else:
-                    model.fit(X, y)
+                    model.fit(X, self._remap_labels(y))
                     self.models[name] = model
             except Exception as e:
                 print(f"[MLPredictor] {name} 全量训练失败: {e}")
@@ -950,13 +1218,13 @@ class MLPredictor:
         return True
 
     def _make_lightgbm(self):
-        """创建 LightGBM 模型"""
+        """创建 LightGBM 模型 (custom_params 优先于默认, 2026-09-08)"""
         try:
             import lightgbm as lgb
-            return lgb.LGBMClassifier(
-                n_estimators=200, max_depth=6, learning_rate=0.05,
-                random_state=42, verbose=-1, n_jobs=1
-            )
+            params = {'n_estimators': 200, 'max_depth': 6, 'learning_rate': 0.05,
+                      'random_state': 42, 'verbose': -1, 'n_jobs': 1}
+            params.update(self.custom_params.get('lgb', {}))
+            return lgb.LGBMClassifier(**params)
         except ImportError:
             return None
 
@@ -975,25 +1243,25 @@ class MLPredictor:
         return tmp_path
 
     def _make_xgboost(self):
-        """创建 XGBoost 模型"""
+        """创建 XGBoost 模型 (custom_params 优先于默认, 2026-09-08)"""
         try:
             import xgboost as xgb
-            return xgb.XGBClassifier(
-                n_estimators=200, max_depth=5, learning_rate=0.05,
-                random_state=42, verbosity=0, n_jobs=1,
-                use_label_encoder=False, eval_metric='logloss'
-            )
+            params = {'n_estimators': 200, 'max_depth': 5, 'learning_rate': 0.05,
+                      'random_state': 42, 'verbosity': 0, 'n_jobs': 1,
+                      'use_label_encoder': False, 'eval_metric': 'logloss'}
+            params.update(self.custom_params.get('xgb', {}))
+            return xgb.XGBClassifier(**params)
         except ImportError:
             return None
 
     def _make_random_forest(self):
-        """创建 RandomForest 模型"""
+        """创建 RandomForest 模型 (custom_params 优先于默认, 2026-09-08)"""
         try:
             from sklearn.ensemble import RandomForestClassifier
-            return RandomForestClassifier(
-                n_estimators=100, max_depth=5, random_state=42,
-                n_jobs=1, class_weight='balanced'
-            )
+            params = {'n_estimators': 100, 'max_depth': 5, 'random_state': 42,
+                      'n_jobs': 1, 'class_weight': 'balanced'}
+            params.update(self.custom_params.get('rf', {}))
+            return RandomForestClassifier(**params)
         except ImportError:
             return None
 
@@ -1016,11 +1284,25 @@ class MLPredictor:
 
     @staticmethod
     def _proba_to_class(proba: np.ndarray) -> np.ndarray:
-        """将连续概率映射为类别 {-1, 0, 1}"""
+        """将连续概率映射为类别 {-1, 0, 1}
+
+        proba 是 Ridge/LightGBM 等回归模型输出的连续值（通常 [0,1] 范围）。
+        阈值 0.5 为分界：> 0.5 → 1 (涨), < 0.0 → -1 (跌), 否则 → 0 (中性)
+        """
         result = np.zeros_like(proba, dtype=int)
-        result[proba > 0.33] = 1
-        result[proba < -0.33] = -1
+        result[proba > 0.5] = 1       # 涨
+        result[proba < 0.0] = -1      # 跌
         return result
+
+    @staticmethod
+    def _remap_labels(y: np.ndarray) -> np.ndarray:
+        """将标签 [-1, 0, 1] 映射为 [0, 1, 2]（兼容 XGBoost/sklearn）"""
+        return y + 1  # -1→0, 0→1, 1→2
+
+    @staticmethod
+    def _unmap_labels(y: np.ndarray) -> np.ndarray:
+        """将标签 [0, 1, 2] 映射回 [-1, 0, 1]"""
+        return y - 1  # 0→-1, 1→0, 2→1
 
     def _compute_feature_importances(self, X: np.ndarray):
         """从各 Level-0 模型计算平均特征重要性"""
@@ -1161,7 +1443,8 @@ class MLPredictor:
 
             self.models['lgb'] = lgb.LGBMClassifier(
                 n_estimators=200, max_depth=6, learning_rate=0.05,
-                random_state=42, verbose=-1
+                random_state=42, verbose=-1,
+                **self.custom_params.get('lgb', {})
             )
 
             if len(X) < 30 or len(y) < 30:
@@ -1203,7 +1486,54 @@ class MLPredictor:
 
     # ── 预测（Stacking 集成） ────────────────────────────────────
 
-    def predict_direction(self, features: np.ndarray) -> Dict:
+    def _predict_c_extension(self, model_name: str, features: np.ndarray) -> Optional[Dict]:
+        """通过 subprocess 预测（避免 C 扩展 SIGSEGV 影响主进程）
+
+        Args:
+            model_name: 模型名称 ('lgb' 或 'xgb')
+            features: 特征数组 (n_features,) 或 (1, n_features)
+
+        Returns:
+            {'up': float, 'down': float, 'neutral': float} 或 None
+        """
+        model_json = os.path.join(self.model_dir, f'model_{model_name}.json')
+        if not os.path.exists(model_json):
+            return None
+
+        feat_list = features.tolist() if features.ndim == 1 else features[0].tolist()
+        input_data = json.dumps({
+            'model': model_json,
+            'features': [feat_list],
+        })
+
+        try:
+            predictor_script = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), '_predictor_process.py'
+            )
+            proc = subprocess.run(
+                [sys.executable, predictor_script],
+                input=input_data,
+                capture_output=True, text=True, timeout=15,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+            )
+            if proc.returncode == 0:
+                output = proc.stdout.strip()
+                result = json.loads(output)
+                if result.get('success') is False:
+                    logger.warning(f"[MLPredictor] Subprocess 预测失败 ({model_name}): {result.get('error')}")
+                    return None
+                return result
+            else:
+                logger.warning(f"[MLPredictor] Subprocess 预测错误 ({model_name}): {proc.stderr[:200]}")
+                return None
+        except subprocess.TimeoutExpired:
+            logger.warning(f"[MLPredictor] Subprocess 预测超时 ({model_name})")
+            return None
+        except Exception as e:
+            logger.warning(f"[MLPredictor] Subprocess 预测异常 ({model_name}): {e}")
+            return None
+
+    def predict_direction(self, features: np.ndarray, klines: Optional[List[Dict]] = None) -> Dict:
         """
         Stacking 集成预测
 
@@ -1214,7 +1544,59 @@ class MLPredictor:
 
         Args:
             features: 单样本特征 (n_features,) 或 (1, n_features)
+            klines: K 线数据（服务器重启后模型未加载时，用于动态训练 GRU）
         """
+        # ── 动态训练 GRU（如果尚未加载但有训练数据） ──
+        need_gru = 'gru' not in self.models
+
+        if need_gru and hasattr(self, '_train_klines') and hasattr(self, '_train_labels'):
+            try:
+                gru = self._make_gru()
+                if gru is not None and self._train_features is not None and self._train_labels is not None:
+                    y = self._remap_labels(self._train_labels)
+                    seq_len = 20
+                    X_seq, all_idx = self._generate_sequences(self._train_features, seq_len)
+                    y_aligned = y[all_idx]
+                    gru.fit(X_seq, y_aligned)
+                    self.models['gru'] = gru
+                    logger.info("[MLPredictor] GRU 已动态训练并加载（缓存数据）")
+                    need_gru = False
+            except Exception as e:
+                logger.warning(f"[MLPredictor] GRU 动态训练失败（缓存数据）: {e}")
+
+        # 服务器重启后：从 klines 动态准备训练数据并训练 GRU
+        if need_gru and klines and len(klines) >= 60:
+            try:
+                # 用最近 N 条数据作为训练样本
+                n_train = min(500, len(klines) - 30)
+                klines_train = klines[:n_train]
+                labels = self.create_labels(klines_train, horizon=5)
+                if len(labels) > 50:
+                    # 使用 batch 方法准备特征（高效）
+                    all_features = self.prepare_features_batch(klines_train, labels)
+                    if all_features is not None and len(all_features) == len(klines_train):
+                        # 对齐标签（create_labels 返回 len(klines) - horizon 个标签）
+                        n_aligned = min(len(all_features), len(labels))
+                        train_features = all_features[:n_aligned]
+                        train_labels = labels[:n_aligned]
+
+                        self._train_klines = klines_train
+                        self._train_labels = train_labels
+                        self._train_features = train_features
+
+                        gru = self._make_gru()
+                        if gru is not None:
+                            y = self._remap_labels(train_labels)
+                            seq_len = 20
+                            X_seq, all_idx = self._generate_sequences(train_features, seq_len)
+                            y_aligned = y[all_idx]
+                            gru.fit(X_seq, y_aligned)
+                            self.models['gru'] = gru
+                            logger.info("[MLPredictor] GRU 已动态训练并加载（klines 数据）")
+                            need_gru = False
+            except Exception as e:
+                logger.warning(f"[MLPredictor] GRU 动态训练失败（klines 数据）: {e}")
+
         if not self.models:
             return {'direction': 'neutral', 'confidence': 0.5,
                     'probabilities': {'up': 0.33, 'down': 0.33, 'neutral': 0.34}}
@@ -1228,11 +1610,22 @@ class MLPredictor:
                 if hasattr(model, 'predict_proba'):
                     proba = model.predict_proba(feat)[0]
                     # 映射到 {-1, 0, 1} → {up, down, neutral}
-                    if len(proba) >= 3:
+                    # 注意: XGBoost/LGBM 训练时用 remapped labels [0,1,2] = [down, neutral, up]
+                    # GRU 训练时用原始 labels [-1,0,1] = [down, neutral, up]，但 proba[:, 0] = up
+                    if name == 'gru':
+                        # GRU: 用原始 labels [-1,0,1] 训练
+                        # Class 0=down(-1), 1=neutral(0), 2=up(1)
                         level0_probs[name] = {
-                            'up': float(proba[0]),
-                            'down': float(proba[1]) if len(proba) > 1 else 0.0,
-                            'neutral': float(proba[2]) if len(proba) > 2 else float(proba[-1]),
+                            'up': float(proba[2]),
+                            'down': float(proba[0]),
+                            'neutral': float(proba[1]),
+                        }
+                    elif len(proba) >= 3:
+                        # XGBoost/LGBM: proba[0]=down, proba[1]=neutral, proba[2]=up
+                        level0_probs[name] = {
+                            'up': float(proba[2]),
+                            'down': float(proba[0]),
+                            'neutral': float(proba[1]),
                         }
                     else:
                         # 二分类: {down, up}
@@ -1245,12 +1638,20 @@ class MLPredictor:
                     # 无 predict_proba，用 predict 产生软概率
                     pred = model.predict(feat)[0]
                     level0_probs[name] = {
-                        'up': 0.5 if pred == 1 else 0.1,
-                        'down': 0.5 if pred == -1 else 0.1,
+                        'up': 0.5 if pred == 2 else 0.1,  # remapped: 2 = up
+                        'down': 0.5 if pred == 0 else 0.1,  # remapped: 0 = down
                         'neutral': 0.3,
                     }
             except Exception as e:
                 print(f"[MLPredictor] {name} 预测失败: {e}")
+
+        # ── Step 1b: C 扩展模型通过 subprocess 预测（LGB/XGB） ──
+        for c_name in ('lgb', 'xgb'):
+            if c_name not in level0_probs:
+                probs = self._predict_c_extension(c_name, feat)
+                if probs:
+                    level0_probs[c_name] = probs
+                    logger.info(f"[MLPredictor] {c_name} subprocess 预测成功: {probs}")
 
         if not level0_probs:
             return {'direction': 'neutral', 'confidence': 0.5,
@@ -1294,6 +1695,17 @@ class MLPredictor:
         # 决策
         direction = 'up' if final_probs['up'] > final_probs['down'] and final_probs['up'] > 0.4 else \
                     'down' if final_probs['down'] > final_probs['up'] and final_probs['down'] > 0.4 else 'neutral'
+
+        # 2026-09-08 推理侧利润阈值 gating (标签层 create_labels 已有同语义阈值):
+        # 赢家与次高概率差 < signal_margin_gate 视为"盖不过交易成本的不确定下注"
+        # (p_up≈p_down 时扣佣金 0.03%+印花税 0.1%+滑点后的期望收益≈0) → 降级 neutral。
+        # 消费方核查: dynamic_ensemble 只读 probabilities (不受影响),
+        # regime_switching._normalize 键形不变, analysis_engine/dashboard 透传 — 兼容。
+        if direction in ('up', 'down') and self.signal_margin_gate > 0:
+            p_win = final_probs[direction]
+            p_other = max(p for k, p in final_probs.items() if k != direction)
+            if p_win - p_other < self.signal_margin_gate:
+                direction = 'neutral'
 
         return {
             'direction': direction,
@@ -1418,6 +1830,9 @@ class MLPredictor:
         """
         从磁盘加载模型
 
+        注意: 在导入大量 C 扩展（PyTorch/LightGBM）后，pickle.load() 可能
+        因内存冲突导致 SIGSEGV。生产环境通过定时训练重新生成模型文件。
+
         Returns:
             是否加载成功
         """
@@ -1490,15 +1905,37 @@ class MLPredictor:
         except (ValueError, TypeError):
             return False
 
+    def _flatten_feature_importances(self, fi: Dict) -> Dict:
+        """将嵌套的 feature_importances 展平为各模型的平均值
+
+        训练进程保存的格式: {'lgb': {feat: val}, 'rf': {feat: val}, ...}
+        展平后: {feat: avg_val}
+        """
+        if not fi:
+            return {}
+        first_val = next(iter(fi.values()), None)
+        if not isinstance(first_val, dict):
+            # 已经是扁平格式
+            return dict(sorted(fi.items(), key=lambda x: x[1], reverse=True))
+
+        # 嵌套格式 → 展平为各特征的平均重要性
+        all_features = {}
+        for model_fi in fi.values():
+            if isinstance(model_fi, dict):
+                for fname, val in model_fi.items():
+                    all_features[fname] = all_features.get(fname, 0.0) + float(val)
+        n_models = len([v for v in fi.values() if isinstance(v, dict)])
+        if n_models > 0:
+            all_features = {k: v / n_models for k, v in all_features.items()}
+        return dict(sorted(all_features.items(), key=lambda x: x[1], reverse=True))
+
     def get_model_report(self) -> Dict:
         """获取模型报告（用于 API 返回）"""
         return {
             'is_trained': self.is_trained,
             'cv_score': self.cv_score,
             'models': list(self.models.keys()),
-            'feature_importances': dict(sorted(
-                self.feature_importances.items(), key=lambda x: x[1], reverse=True
-            )),
+            'feature_importances': self._flatten_feature_importances(self.feature_importances),
             'ic_history': {k: round(np.mean(v), 4) if v else 0 for k, v in self.factor_ic_history.items()},
             'trained_at': self._trained_at,
             'is_fresh': self.is_model_fresh(),
@@ -1550,24 +1987,14 @@ class FeatureEngineering:
     @staticmethod
     def _ema_arr(data: np.ndarray, period: int) -> np.ndarray:
         """EMA 数组（委托给共享工具）"""
-        from modules.utils.technical import ema_array
+        from modules.technical import ema_array
         return ema_array(data, period)
 
     @staticmethod
     def _rsi_arr(data: np.ndarray, period: int = 14) -> np.ndarray:
         """RSI 数组（委托给共享工具）"""
-        from modules.utils.technical import rsi_array
+        from modules.technical import rsi_array
         return rsi_array(data, period)
-        losses = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(data)
-        avg_loss = np.zeros_like(data)
-        avg_gain[period] = np.mean(gains[:period])
-        avg_loss[period] = np.mean(losses[:period])
-        for i in range(period + 1, len(data)):
-            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gains[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period - 1) + losses[i-1]) / period
-        rs = avg_gain / (avg_loss + 1e-10)
-        return 100 - (100 / (1 + rs))
 
     @staticmethod
     def _bollinger_bands(data: np.ndarray, period: int = 20, std_dev: float = 2):
@@ -1644,7 +2071,7 @@ class ModelTrainingScheduler:
             daemon=True,
         )
         self._thread.start()
-        logger.info(f"[ModelTrainingScheduler] 调度器已启动，重训练间隔: {self.interval_hours}h")
+        logger.info(f"[ModelTrainingScheduler] 调度器已启动，每天 23:00 定时重训练")
 
     def stop(self):
         """停止后台调度"""
@@ -1695,31 +2122,41 @@ class ModelTrainingScheduler:
         }
 
     def _scheduler_loop(self):
-        """后台调度循环: 等待 interval_hours 后触发训练，然后重复"""
+        """后台调度循环: 每天 23:00 触发训练"""
         while not self._stop_event.is_set():
-            if self._stop_event.wait(self.interval_hours * 3600):
+            wait_seconds = self._seconds_until_next_2300()
+            if self._stop_event.wait(wait_seconds):
                 break  # 收到停止信号
 
             if self._stop_event.is_set():
                 break
 
-            logger.info("[ModelTrainingScheduler] 定时重训练触发")
+            logger.info("[ModelTrainingScheduler] 定时重训练触发 (23:00)")
             self._train_and_schedule()
 
     def _schedule_next(self):
-        """设置下一次训练的定时器（使用 Timer 而非 sleep，支持动态调整）"""
+        """设置下一次 23:00 训练的定时器（使用 Timer 而非 sleep，支持动态调整）"""
+        wait_seconds = self._seconds_until_next_2300()
         # 使用 Timer 实现非阻塞定时
         timer = threading.Timer(
-            self.interval_hours * 3600,
+            wait_seconds,
             self._on_timer_expire,
         )
         timer.daemon = True
         timer.start()
 
+    def _seconds_until_next_2300(self) -> float:
+        """计算到下一次 23:00 的秒数"""
+        now = datetime.now()
+        target = now.replace(hour=23, minute=0, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return (target - now).total_seconds()
+
     def _on_timer_expire(self):
-        """Timer 到期回调"""
+        """Timer 到期回调 (23:00 触发)"""
         if not self._stop_event.is_set():
-            logger.info("[ModelTrainingScheduler] 定时重训练触发")
+            logger.info("[ModelTrainingScheduler] 定时重训练触发 (23:00)")
             self._train_and_schedule()
 
     def set_drift_monitor(self, drift_monitor):
@@ -1761,7 +2198,7 @@ class ModelTrainingScheduler:
 
     def _train_for_stock(self, stock_code: str) -> Dict:
         """
-        为指定股票训练模型
+        为指定股票训练模型（使用进程隔离避免 SIGSEGV）
 
         Args:
             stock_code: 股票代码
@@ -1771,6 +2208,7 @@ class ModelTrainingScheduler:
         """
         try:
             from modules.data_fetcher import StockDataFetcher
+            from modules import ml_training_worker
 
             fetcher = StockDataFetcher()
             stock_data = fetcher.get_stock_info(stock_code)
@@ -1782,7 +2220,7 @@ class ModelTrainingScheduler:
             if not stock_data:
                 return {'success': False, 'message': '无法获取股票数据'}
 
-            # 准备特征
+            # 准备特征（主进程安全：不涉及模型创建）
             features = self.predictor.prepare_features(stock_data, klines)
             if features is None:
                 return {'success': False, 'message': '特征准备失败'}
@@ -1791,34 +2229,132 @@ class ModelTrainingScheduler:
             if len(labels) < 60:
                 return {'success': False, 'message': f'标签不足: {len(labels)}'}
 
+            logger.info(f"[ModelTrainingScheduler] 标签: {len(labels)}, 特征: {features.shape}")
+
             full_features = self.predictor.prepare_features_batch(klines, labels)
             if full_features is None or len(full_features) < 100:
                 return {'success': False, 'message': f'完整特征不足: {len(full_features) if full_features else 0}'}
 
+            # 对齐 X 和 y 长度（create_labels 返回 len(klines)-horizon，prepare_features_batch 返回 len(klines)）
+            full_features = full_features[:len(labels)]
+
             dates = [klines[i].get('date', f'day_{i}') for i in range(len(klines))]
 
-            # 训练
-            success = self.predictor.train_stacking_ensemble(full_features, labels, dates=dates)
+            # 使用进程隔离训练（避免 C 扩展内存冲突 SIGSEGV）
+            # 2026-09-08: 调参结果透传 — 子进程 trainer 用调参参数建模。
+            # custom_params 空 (从未手动 POST 调参) → 回落读 02:00 夜间调参
+            # 快照 (data/hyperparam_snapshot.json, 7 天时效守卫) = 凌晨调参
+            # → 当晚 22:00 重训消费, 每日闭环
+            from modules.hyperparam_optimizer import load_param_snapshot
+            tuned_params = dict(self.predictor.custom_params) or load_param_snapshot() or None
 
-            if success and self.predictor.is_trained:
-                # 持久化
-                path = self.predictor.save_model()
-                return {
-                    'success': True,
-                    'stock_code': stock_code,
-                    'cv_score': self.predictor.cv_score,
-                    'models': list(self.predictor.models.keys()),
-                    'path': path,
-                    'trained_at': self.predictor._trained_at,
-                }
-            else:
-                return {'success': False, 'message': '训练失败'}
+            result = ml_training_worker.run_training(
+                X=full_features,
+                y=labels,
+                feature_names=self.predictor.feature_names,
+                model_dir=self.predictor.model_dir,
+                timeout=300,
+                custom_params=tuned_params,
+            )
+
+            if result.get('success'):
+                try:
+                    # 更新主进程状态（传入 klines/labels/features 用于 GRU 动态训练）
+                    self._update_from_training_result(result, klines=klines, labels=labels, features=full_features)
+                    logger.info(f"[ModelTrainingScheduler] 训练成功: CV={result.get('cv_score', 0):.3f}, 模型={result.get('models_trained', [])}")
+                except Exception as e:
+                    logger.error(f"[ModelTrainingScheduler] _update_from_training_result 失败: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    # 即使更新失败，也记录训练成功
+                    logger.info(f"[ModelTrainingScheduler] 训练完成但状态更新失败: CV={result.get('cv_score', 0):.3f}")
+
+            return result
 
         except Exception as e:
             logger.error(f"[ModelTrainingScheduler] 训练异常: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return {'success': False, 'error': str(e)}
+
+    def _update_from_training_result(self, result: Dict, klines: Optional[List[Dict]] = None,
+                                      labels: Optional[np.ndarray] = None,
+                                      features: Optional[np.ndarray] = None):
+        """从训练结果更新预测器状态（安全加载模型，避免 C 扩展 SIGSEGV）
+
+        注意: LightGBM/XGBoost 的 C 扩展在 main process 中会导致 SIGSEGV，
+        因此只加载 RandomForest（sklearn 纯 Python/Cython）。
+        GRU 由主进程在 predict_direction 中动态训练（需要 klines 数据）。
+        """
+        p = self.predictor
+        p.is_trained = True
+        p.cv_score = result.get('cv_score', 0.0)
+        p._trained_at = datetime.now().isoformat()
+
+        # 存储训练数据（用于 GRU 动态训练）
+        if klines is not None and labels is not None and features is not None:
+            p._train_klines = klines
+            p._train_labels = labels.copy()
+            p._train_features = features.copy()
+            logger.info(f"[MLPredictor] 训练数据已缓存: {len(klines)} klines, {len(labels)} labels, {features.shape}")
+
+        # 安全加载模型: 只加载 RandomForest（sklearn 纯 Python/Cython）
+        # LightGBM/XGBoost 的 C 扩展在 main process 中会导致 SIGSEGV，跳过
+        p.models = {}
+        native_files = result.get('native_model_files', {})
+        for name, json_path in native_files.items():
+            logger.info(f"[MLPredictor] 跳过 C 扩展模型（SIGSEGV 保护）: {name}")
+
+        # 加载 RandomForest（独立 pickle 文件，安全）
+        rf_path = os.path.join(p.model_dir, 'model_rf.pkl')
+        if os.path.exists(rf_path):
+            try:
+                import time
+                time.sleep(0.3)  # 等待子进程释放文件锁
+                with open(rf_path, 'rb') as f:
+                    rf_model = pickle.load(f)
+                p.models['rf'] = rf_model
+                logger.info(f"[MLPredictor] RandomForest 已加载: {rf_path}")
+            except Exception as e:
+                logger.warning(f"[MLPredictor] RandomForest 加载失败: {e}")
+        else:
+            logger.warning(f"[MLPredictor] RandomForest 文件不存在: {rf_path}")
+
+        # 加载 RandomForest（独立 pickle 文件，安全）
+        rf_path = os.path.join(p.model_dir, 'model_rf.pkl')
+        if os.path.exists(rf_path):
+            try:
+                import time
+                time.sleep(0.3)  # 等待子进程释放文件锁
+                with open(rf_path, 'rb') as f:
+                    rf_model = pickle.load(f)
+                p.models['rf'] = rf_model
+                logger.info(f"[MLPredictor] RandomForest 已加载: {rf_path}")
+            except Exception as e:
+                logger.warning(f"[MLPredictor] RandomForest 加载失败: {e}")
+        else:
+            logger.warning(f"[MLPredictor] RandomForest 文件不存在: {rf_path}")
+
+        # 加载元学习器参数
+        meta_params = result.get('meta_learner_params')
+        if meta_params:
+            try:
+                from sklearn.linear_model import Ridge
+                p.meta_learner = Ridge(alpha=meta_params['alpha'])
+                p.meta_learner.coef_ = np.array(meta_params['coef_'])
+                p.meta_learner.intercept_ = np.array(meta_params['intercept_'])
+                p.meta_learner.max_iter = meta_params.get('max_iter', 1000)
+                logger.info("[MLPredictor] Ridge 元学习器已从参数重建")
+            except Exception as e:
+                logger.warning(f"[MLPredictor] 元学习器重建失败: {e}")
+                p.meta_learner = None
+
+        # 加载元数据
+        p.feature_importances = result.get('feature_importances', {})
+        p.factor_ic = result.get('model_scores', {})
+        p.factor_ic_history = result.get('factor_ic', {})
+        logger.info(f"[MLPredictor] 状态已更新: CV={p.cv_score:.3f}, "
+                    f"models={list(p.models.keys())}, trained_at={p._trained_at}")
 
     def batch_train_stocks(self, stock_codes: List[str], incremental: bool = False) -> Dict:
         """批量训练多只股票的模型
@@ -1879,6 +2415,9 @@ class ModelTrainingScheduler:
             full_features = self.predictor.prepare_features_batch(klines, labels)
             if full_features is None or len(full_features) < 60:
                 return {'success': False, 'message': f'完整特征不足: {len(full_features) if full_features else 0}'}
+
+            # 对齐 X 和 y 长度
+            full_features = full_features[:len(labels)]
 
             dates = [klines[i].get('date', f'day_{i}') for i in range(len(klines))]
 

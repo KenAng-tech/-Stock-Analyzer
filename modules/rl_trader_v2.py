@@ -66,7 +66,9 @@ class TradingEnvV2:
                  initial_capital: float = 1000000,
                  transaction_cost: float = 0.0015,
                  max_drawdown_limit: float = 0.2,
-                 reward_type: str = 'sharpe'):
+                 reward_type: str = 'sharpe',
+                 execution_model: str = 'simple',
+                 limit_pct: float = 0.10):
         """
         Args:
             prices: (T,) 价格序列
@@ -82,6 +84,21 @@ class TradingEnvV2:
         self.transaction_cost = transaction_cost
         self.max_drawdown_limit = max_drawdown_limit
         self.reward_type = reward_type
+
+        # P1 (2026-09-10, TradeMaster order_execution 思想翻译): 执行保真开关, 默认关
+        #   'simple'  = 2026-07 旧行为逐字节不变 (任何非 'a_share' 值均安全降级)
+        #   'a_share' = A股执行保真: 涨跌停拒单 + 成本保真 (买佣金0.03%+滑点 / 卖 +印花税0.1%; 复用 modules/execution/slippage)
+        #   T+1 注记: 动作粒度=日, 买卖天然不同 bar → T+1 天然成立 (日内换手 env 才需显式 T+1)
+        #   当前本 env 无活链实例方 (09-10 侦察); 升级不影响任何正在运行的链 (含 23:00 drl_agent 链)
+        self.execution_model = execution_model
+        self.limit_pct = float(limit_pct) if isinstance(limit_pct, (int, float)) else 0.10
+        self._slippage_model = None
+        if execution_model == 'a_share':
+            try:
+                from modules.execution.slippage import DynamicSlippageModel
+                self._slippage_model = DynamicSlippageModel()
+            except Exception as e:
+                logger.warning(f"[TradingEnvV2] 滑点模型不可用 ({e}), 降级固定 transaction_cost")
 
         self.n_steps = len(prices)
         self.n_features = features.shape[1] if len(features.shape) > 1 else 1
@@ -135,9 +152,21 @@ class TradingEnvV2:
         # 计算价格变化
         price_return = (current_price / prev_price - 1) if prev_price > 0 else 0
 
-        # 执行交易
+        # 执行交易 (P1 2026-09-10: a_share = 涨跌停拒单 + T+1; 默认 'simple' 完全不进本分支)
         trade_size = 0.0
-        if action == 1:  # buy
+        rejected = None
+        if self.execution_model == 'a_share':
+            # 涨停拒买 (排板买不进) / 跌停拒卖 (排撤卖不出) — 与 walkforward :244/:269 BUY/SELL_REJECTED 同一语义
+            # (2026-09-10 自查: T+1 在日频动作粒度天然成立, 写代码=装饰性死代码 → 不写)
+            pct_chg = (current_price / prev_price - 1) if prev_price > 0 else 0.0
+            if pct_chg >= self.limit_pct * 0.995 and action == 1:
+                rejected = 'limit_up'
+            elif pct_chg <= -self.limit_pct * 0.995 and action == 2:
+                rejected = 'limit_down'
+
+        if rejected is not None:
+            target_position = self.position  # 拒单 = 无成交 (排板/排撤不出 = TradeMaster 撮合语义)
+        elif action == 1:  # buy
             target_position = min(1.0, self.position + 0.2)
             trade_size = target_position - self.position
         elif action == 2:  # sell
@@ -146,9 +175,26 @@ class TradingEnvV2:
         else:  # hold
             target_position = self.position
 
-        # 交易成本
+        # 交易成本 (a_share: 买 佣金0.03%+滑点; 卖 佣金0.03%+印花税0.1%+滑点; 滑点 = DynamicSlippageModel)
         if abs(trade_size) > 0.01:
-            cost = abs(trade_size) * self.total_value * self.transaction_cost
+            if self.execution_model == 'a_share':
+                trade_amount = abs(trade_size) * self.total_value
+                slip = self.transaction_cost
+                if self._slippage_model is not None:
+                    win = self.prices[max(0, self._current_step - 20):self._current_step + 1]
+                    if len(win) >= 5:
+                        r20 = np.diff(win) / (np.abs(win[:-1]) + 1e-10)
+                        vol_ann = float(np.std(r20)) * float(np.sqrt(252.0))
+                    else:
+                        vol_ann = 0.005
+                    slip = self._slippage_model.estimate(
+                        float(current_price), 0, volatility=vol_ann)['slippage_ratio']
+                if trade_size > 0:
+                    cost = trade_amount * (0.0003 + slip)
+                else:
+                    cost = trade_amount * (0.0003 + 0.001 + slip)
+            else:
+                cost = abs(trade_size) * self.total_value * self.transaction_cost
             self.total_value -= cost
             self.trades.append({
                 'step': self._current_step,
@@ -174,7 +220,7 @@ class TradingEnvV2:
         drawdown = (self.peak_value - self.total_value) / self.peak_value if self.peak_value > 0 else 0
 
         # 计算奖励
-        reward = self._calculate_reward(portfolio_return, drawdown, action)
+        reward = self._calculate_reward(portfolio_return, drawdown, action, rejected=rejected)
 
         info = {
             'total_value': self.total_value,
@@ -184,16 +230,18 @@ class TradingEnvV2:
             'drawdown': drawdown,
             'reward': reward,
             'price': current_price,
+            'rejected': rejected,
         }
 
         return self._get_observation(), reward, done, info
 
-    def _calculate_reward(self, portfolio_return: float, drawdown: float, action: int) -> float:
+    def _calculate_reward(self, portfolio_return: float, drawdown: float, action: int,
+                          rejected: Optional[str] = None) -> float:
         """计算奖励"""
         reward = portfolio_return
 
-        # 交易成本惩罚
-        if abs(action - 1) > 0.5:  # 非 hold 操作
+        # 交易成本惩罚 (P1: 拒单步无成交, 不计惩罚)
+        if rejected is None and abs(action - 1) > 0.5:  # 非 hold 操作
             reward -= 0.001  # 固定惩罚
 
         # 回撤惩罚
@@ -647,6 +695,267 @@ class PPOAgentV2:
         return agent
 
 
+# ── Attention-enhanced PPO Agent (Phase 3 增强) ──────────────────────
+
+class AttentionPPOAgent:
+    """
+    带注意力机制的 PPO Agent
+
+    新增:
+    1. Self-Attention 层 — 捕捉长期依赖
+    2. Regime-adaptive Action — 根据市场状态调整动作空间
+    3. Online Fine-tuning — 在线微调
+    """
+
+    def __init__(self, state_dim: int, action_dim: int = 3,
+                 hidden_dim: int = 128, attention_heads: int = 4,
+                 lr: float = 0.0003, gamma: float = 0.99,
+                 clip_coef: float = 0.2, ent_coef: float = 0.01):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+        self.attention_heads = attention_heads
+        self.lr = lr
+        self.gamma = gamma
+        self.clip_coef = clip_coef
+        self.ent_coef = ent_coef
+
+        # 经验存储
+        self.observations = []
+        self.actions = []
+        self.rewards = []
+        self.dones = []
+        self.log_probs = []
+        self.values = []
+
+        # 策略网络 (带注意力)
+        self.policy_w1 = np.random.randn(state_dim, hidden_dim) * np.sqrt(2.0 / state_dim)
+        self.policy_b1 = np.zeros(hidden_dim)
+        self.policy_w2 = np.random.randn(hidden_dim, hidden_dim) * np.sqrt(2.0 / hidden_dim)
+        self.policy_b2 = np.zeros(hidden_dim)
+
+        # 注意力层
+        self.attention_w = np.random.randn(hidden_dim, hidden_dim) * np.sqrt(1.0 / hidden_dim)
+        self.attention_b = np.zeros(hidden_dim)
+        self.attention_out = np.random.randn(hidden_dim, attention_heads) * np.sqrt(1.0 / hidden_dim)
+
+        # 策略输出
+        self.policy_logits = np.random.randn(hidden_dim, action_dim) * np.sqrt(1.0 / hidden_dim)
+
+        # 价值网络
+        self.value_w1 = np.random.randn(state_dim, hidden_dim) * np.sqrt(2.0 / state_dim)
+        self.value_b1 = np.zeros(hidden_dim)
+        self.value_w2 = np.random.randn(hidden_dim, hidden_dim) * np.sqrt(2.0 / hidden_dim)
+        self.value_b2 = np.zeros(hidden_dim)
+        self.value_out = np.random.randn(hidden_dim, 1) * np.sqrt(1.0 / hidden_dim)
+
+        self._adam_states = {}
+        self._trained = False
+
+    def select_action(self, state: np.ndarray, explore: bool = True,
+                      regime: str = 'neutral') -> Tuple[int, float, float]:
+        """
+        选择动作 (带 regime-adaptive 调整)
+        """
+        action_logits = self._policy_forward(state)
+
+        # Regime-adaptive 调整
+        if regime == 'bull':
+            action_logits[:, 1] += 0.1  # 偏向 buy
+        elif regime == 'bear':
+            action_logits[:, 2] += 0.1  # 偏向 sell
+
+        action_probs = self._softmax(action_logits).squeeze(0)
+
+        if explore:
+            action = self._categorical_sample(action_probs)
+        else:
+            action = int(np.argmax(action_probs))
+
+        log_prob = np.log(action_probs[action] + 1e-10)
+        value = float(self._value_forward(state).squeeze())
+        return action, log_prob, value
+
+    def store_transition(self, obs: np.ndarray, action: int, reward: float,
+                         done: bool, log_prob: float, value: float):
+        self.observations.append(obs.copy())
+        self.actions.append(action)
+        self.rewards.append(reward)
+        self.dones.append(done)
+        self.log_probs.append(log_prob)
+        self.values.append(value)
+
+    def train(self) -> Dict:
+        n_samples = len(self.rewards)
+        if n_samples < 10:
+            return {'loss': 0.0}
+
+        obs_array = np.array(self.observations)
+        actions = np.array(self.actions)
+        rewards = np.array(self.rewards)
+        dones = np.array(self.dones)
+        old_log_probs = np.array(self.log_probs)
+        old_values = np.array(self.values)
+
+        advantages, returns = self._compute_gae(rewards, dones, old_values)
+        advantages = (advantages - np.mean(advantages)) / (np.std(advantages) + 1e-10)
+
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        total_entropy = 0.0
+        n_updates = 0
+
+        for epoch in range(10):
+            indices = np.random.permutation(n_samples)
+            for start in range(0, n_samples, 64):
+                end = min(start + 64, n_samples)
+                idx = indices[start:end]
+                batch_size = len(idx)
+
+                batch_obs = obs_array[idx]
+                batch_actions = actions[idx]
+                batch_advantages = advantages[idx]
+                batch_returns = returns[idx]
+                batch_old_log_probs = old_log_probs[idx]
+
+                curr_logits = self._policy_forward(batch_obs)
+                curr_probs = self._softmax(curr_logits)
+                curr_log_probs = np.log(curr_probs + 1e-10)
+
+                action_log_probs = np.array([curr_log_probs[i, a] for i, a in enumerate(batch_actions)])
+                ratio = np.exp(action_log_probs - batch_old_log_probs)
+
+                surr1 = ratio * batch_advantages
+                surr2 = np.clip(ratio, 1 - self.clip_coef, 1 + self.clip_coef) * batch_advantages
+                policy_loss = -np.mean(np.minimum(surr1, surr2))
+
+                value_pred = self._value_forward(batch_obs).flatten()
+                value_pred_clipped = old_values[idx] + np.clip(value_pred - old_values[idx], -self.clip_coef, self.clip_coef)
+                value_loss = 0.5 * np.mean(np.maximum((value_pred - batch_returns) ** 2,
+                                                       (value_pred_clipped - batch_returns) ** 2))
+
+                entropy = -np.sum(curr_probs * np.log(curr_probs + 1e-10), axis=1)
+                entropy_loss = np.mean(entropy)
+
+                loss = policy_loss + 0.5 * value_loss - self.ent_coef * entropy_loss
+                total_policy_loss += policy_loss
+                total_value_loss += value_loss
+                total_entropy += entropy_loss
+                n_updates += 1
+
+        self._clear_buffer()
+        self._trained = True
+        return {
+            'policy_loss': float(total_policy_loss / max(n_updates, 1)),
+            'value_loss': float(total_value_loss / max(n_updates, 1)),
+            'entropy': float(total_entropy / max(n_updates, 1)),
+        }
+
+    def online_fine_tune(self, env: 'TradingEnvV2', n_episodes: int = 10) -> Dict:
+        """在线微调"""
+        episode_rewards = []
+        for _ in range(n_episodes):
+            obs = env.reset()
+            total_reward = 0.0
+            explore = 0.1
+            while True:
+                action, log_prob, value = self.select_action(obs, explore=explore)
+                obs, reward, done, _ = env.step(action)
+                self.store_transition(obs, action, reward, done, log_prob, value)
+                total_reward += reward
+                if done:
+                    break
+            self.train()
+            episode_rewards.append(total_reward)
+        return {
+            'mean_reward': float(np.mean(episode_rewards)),
+            'std_reward': float(np.std(episode_rewards)),
+            'episodes': n_episodes,
+        }
+
+    def _policy_forward(self, obs: np.ndarray) -> np.ndarray:
+        if obs.ndim == 1:
+            obs = obs[np.newaxis, :]
+        h = self._relu(obs @ self.policy_w1 + self.policy_b1)
+        h = self._relu(h @ self.policy_w2 + self.policy_b2)
+        # 注意力机制
+        attention_input = self._relu(h @ self.attention_w + self.attention_b)
+        attention_weights = self._softmax(attention_input @ self.attention_out)
+        h = h * attention_weights.mean(axis=1, keepdims=True)
+        return h @ self.policy_logits
+
+    def _value_forward(self, obs: np.ndarray) -> np.ndarray:
+        if obs.ndim == 1:
+            obs = obs[np.newaxis, :]
+        h = self._relu(obs @ self.value_w1 + self.value_b1)
+        h = self._relu(h @ self.value_w2 + self.value_b2)
+        return h @ self.value_out
+
+    def _compute_gae(self, rewards, dones, values):
+        n = len(rewards)
+        advantages = np.zeros(n)
+        returns = np.zeros(n)
+        gae = 0.0
+        for t in reversed(range(n)):
+            next_value = 0.0 if t == n - 1 else (values[t + 1] if not dones[t] else 0.0)
+            delta = rewards[t] + self.gamma * next_value - values[t]
+            gae = delta + self.gamma * 0.95 * gae
+            advantages[t] = gae
+            returns[t] = gae + values[t]
+        return advantages, returns
+
+    @staticmethod
+    def _relu(x): return np.maximum(0, x)
+
+    @staticmethod
+    def _softmax(x):
+        exp_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
+        return exp_x / np.sum(exp_x, axis=-1, keepdims=True)
+
+    @staticmethod
+    def _categorical_sample(probs):
+        return int(np.argmax(np.random.multinomial(1, probs)))
+
+    def _clear_buffer(self):
+        self.observations.clear()
+        self.actions.clear()
+        self.rewards.clear()
+        self.dones.clear()
+        self.log_probs.clear()
+        self.values.clear()
+
+    def save(self, path: str):
+        data = {
+            'policy_w1': self.policy_w1, 'policy_b1': self.policy_b1,
+            'policy_w2': self.policy_w2, 'policy_b2': self.policy_b2,
+            'policy_logits': self.policy_logits,
+            'attention_w': self.attention_w, 'attention_b': self.attention_b,
+            'attention_out': self.attention_out,
+            'value_w1': self.value_w1, 'value_b1': self.value_b1,
+            'value_w2': self.value_w2, 'value_b2': self.value_b2,
+            'value_out': self.value_out,
+            'config': {'state_dim': self.state_dim, 'action_dim': self.action_dim,
+                       'hidden_dim': self.hidden_dim, 'attention_heads': self.attention_heads},
+            'trained': self._trained,
+        }
+        with open(path, 'wb') as f:
+            pickle.dump(data, f)
+        logger.info(f"[AttentionPPOAgent] 模型已保存：{path}")
+
+    @classmethod
+    def load(cls, path: str) -> 'AttentionPPOAgent':
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
+        config = data['config']
+        agent = cls(**config)
+        for key in ['policy_w1', 'policy_b1', 'policy_w2', 'policy_b2',
+                     'policy_logits', 'attention_w', 'attention_b', 'attention_out',
+                     'value_w1', 'value_b1', 'value_w2', 'value_b2', 'value_out']:
+            setattr(agent, key, data[key])
+        agent._trained = data.get('trained', False)
+        return agent
+
+
 # ── SAC Agent ──────────────────────────────────────────────
 
 class SACAgentV2:
@@ -1013,17 +1322,34 @@ class SACAgentV2:
 
 class RLTraderV2:
     """
-    强化学习交易器 V2 — PPO + SAC 集成
+    强化学习交易器 V2 — PPO + SAC + AttentionPPO 集成
 
     市场状态检测 → 选择最佳 Agent → 集成动作
+    Phase 3 增强:
+    1. AttentionPPOAgent — 带注意力机制的 PPO
+    2. Regime-adaptive Action — 根据市场状态调整动作空间
+    3. Online Fine-tuning — 在线微调
     """
 
-    def __init__(self, state_dim: int = 20, action_dim: int = 3):
+    def __init__(self, state_dim: int = 20, action_dim: int = 3,
+                 sac_as_default: bool = True):
+        """
+        初始化 RLTraderV2
+
+        Args:
+            state_dim: 状态维度
+            action_dim: 动作维度 (3 = hold/buy/sell)
+            sac_as_default: 是否使用 SAC 作为默认主 Agent (默认 True)
+                - True:  SAC 为主力，PPO 为辅助，AttentionPPO 为趋势增强
+                - False: 传统 PPO 为主，SAC 为探索增强
+        """
         self.state_dim = state_dim
         self.action_dim = action_dim
+        self.sac_as_default = sac_as_default
 
         self.ppo_agent = PPOAgentV2(state_dim, action_dim)
         self.sac_agent = SACAgentV2(state_dim, action_dim)
+        self.attention_ppo = AttentionPPOAgent(state_dim, action_dim)
 
         self._trained = False
         self._market_regime = 'neutral'  # 'bull', 'bear', 'neutral'
@@ -1035,13 +1361,19 @@ class RLTraderV2:
         """设置市场状态"""
         self._market_regime = regime
 
-    def train_ppo(self, env: TradingEnvV2, n_episodes: int = 100) -> Dict:
-        """训练 PPO Agent"""
+    def train_ppo(self, env: TradingEnvV2, n_episodes: int = 100, timeout: float = None) -> Dict:
+        """训练 PPO Agent (timeout = 墙钟 deadline 时间戳, 默认 None = 无上限兼容旧调用)"""
+        import time as _t
         logger.info(f"[RLTraderV2] PPO 训练：{n_episodes} episodes")
 
         episode_rewards = []
 
         for episode in range(n_episodes):
+            # 2026-09-10 链修: 墙钟预算 guard (长循环无内部 timeout = 断链源, hyperparam 2400s 事故同族)
+            if timeout is not None and _t.perf_counter() > timeout:
+                logger.warning(f"[RLTraderV2] PPO 训练时间预算耗尽, 停在 episode {episode+1}")
+                break
+
             obs = env.reset(seed=episode)
             total_reward = 0.0
             explore = max(0.1, 1.0 - episode * 0.01)
@@ -1070,10 +1402,76 @@ class RLTraderV2:
         self._trained = True
         return {
             'agent': 'ppo',
-            'episodes': n_episodes,
-            'mean_reward': float(np.mean(episode_rewards[-20:])),
-            'std_reward': float(np.std(episode_rewards[-20:])),
+            'episodes': len(episode_rewards),
+            # 空 replay guard (2026-09-10): NaN 会随 jsonify 泄漏成非法 JSON
+            'mean_reward': float(np.mean(episode_rewards[-20:])) if episode_rewards else 0.0,
+            'std_reward': float(np.std(episode_rewards[-20:])) if episode_rewards else 0.0,
         }
+
+    def train(self, X, y=None, closes=None, n_episodes: int = 30,
+              timeout: float = 240.0, execution_model: str = 'simple') -> Dict:
+        """
+        训练链入口 (2026-09-10 死链修复 — POST /api/rl/train 恒 200+success:false 史)
+
+        断链修复: 此方法原本不存在, dl_routes.api_rl_train 直接 .train(X, y)
+        → AttributeError → except 吞 → 端点从未活过 (0.285s 实测锁)。本 adapter
+        把 (X, closes) 翻译成 TradingEnvV2 (P1 执行保真 env) 并驱动 train_ppo,
+        断链 = train_ppo 原链身 (select_action 离散动作 × env.step 兼容已核)。
+
+        断链三连 (2026-09-10 全修):
+          ① .train 不存在 → 本方法
+          ② 形状 (endpoint X 12D → env obs 17 维 ≠ agent 输入 20) → features pad 至 state_dim-5
+          ③ 前端 toFixed (dl_dashboard.html 读 training_result.mean_reward) → endpoint 回包增键
+
+        Args:
+            X: (n,F) state 特征矩阵 (endpoint compute_features = 12D)
+            y: 忽略 (env 不注入 label, 仅保 endpoint 签名兼容)
+            closes: (m,) 收盘价链 (取后 n 条与 features 对齐; 缺省 = 恒价链降级)
+            n_episodes: PPO episode 数 (默认 30 = endpoint 默认)
+            timeout: 墙钟预算 (秒, episode 级 guard 防单点无限阻塞)
+            execution_model: 'simple'|'a_share' → TradingEnvV2 执行保真开关 (默认关)
+
+        Returns:
+            统计 dict (agent/episodes/mean_reward/elapsed_s/…), 降级返回 {'agent','skipped'|'error'} (不抛)
+        """
+        import time as _t
+        X = np.asarray(X, dtype=np.float64)
+        if X.ndim != 2 or len(X) < 30:
+            logger.warning(f"[RLTraderV2] 训练数据不足: X shape={X.shape}")
+            return {'agent': 'ppo', 'episodes': 0,
+                    'skipped': f'X shape insufficient: {X.shape}'}
+
+        # ② 形状适配: 对齐 ppo_agent 实际输入维 = state_dim-5 (obs=F+5 必须对齐)
+        #    服务链 (app.py:283 load() 替换 ppo_agent) 消费者 =17 (07-15 pkl 权重) → X 12D 原生直通;
+        #    singleton/默认链 =20 → pad 15。盲用 self.state_dim(恒20) = matmul 17≠20 crash (09-11 链尾实证)
+        n = len(X)
+        f_need = getattr(self.ppo_agent, 'state_dim', self.state_dim) - 5
+        if X.shape[1] < f_need:
+            X = np.pad(X, ((0, 0), (0, f_need - X.shape[1])))
+        elif X.shape[1] > f_need:
+            X = X[:, :f_need]
+
+        # prices 对齐: 后 n 条与 features[i] 配对 (缺省恒价 = 降级, 非崩)
+        if closes is not None:
+            c = np.asarray(closes, dtype=np.float64)
+            if len(c) >= n:
+                prices = c[-n:]
+            else:
+                pad = n - len(c)
+                prices = np.pad(c, (0, pad), constant_values=float(c[-1]) if len(c) else 100.0)
+        else:
+            prices = np.full(n, 100.0, dtype=np.float64)
+
+        t0 = _t.perf_counter()
+        deadline = t0 + max(0.05, float(timeout))  # 0 = 全预算耗尽 (unit test guard 验证路径)
+        try:
+            env = TradingEnvV2(prices, X, execution_model=execution_model)
+            result = self.train_ppo(env, n_episodes=n_episodes, timeout=deadline)
+            result['elapsed_s'] = round(_t.perf_counter() - t0, 1)
+            return result
+        except Exception as e:
+            logger.error(f"[RLTraderV2] 训练链异常: {e}")
+            return {'agent': 'ppo', 'episodes': 0, 'error': str(e)}
 
     def train_sac(self, env: TradingEnvV2, n_steps: int = 10000) -> Dict:
         """训练 SAC Agent"""
@@ -1117,62 +1515,153 @@ class RLTraderV2:
 
     def trade(self, obs: np.ndarray) -> Dict:
         """
-        交易决策
+        交易决策 (Phase 3 增强 — SAC 默认主 Agent)
 
-        根据市场状态选择 Agent 并集成动作
+        架构:
+            SAC 作为默认主 Agent (最大熵探索 + 稳定性)
+            PPO 作为辅助 (确定性策略)
+            AttentionPPO 作为趋势增强 (牛市中权重提升)
+
+        权重配置 (sac_as_default=True):
+            regime     | SAC   | PPO   | AttentionPPO
+            -----------|-------|-------|-------------
+            bullish    | 0.40  | 0.20  | 0.40
+            bearish    | 0.60  | 0.25  | 0.15
+            sideways   | 0.50  | 0.30  | 0.20
+
+        权重配置 (sac_as_default=False, 向后兼容):
+            regime     | PPO   | SAC   | AttentionPPO
+            -----------|-------|-------|-------------
+            bullish    | 0.40  | 0.20  | 0.40
+            bearish    | 0.25  | 0.60  | 0.15
+            sideways   | 0.30  | 0.30  | 0.20
         """
         if not self._trained:
             return {'error': '模型未训练', 'action': 'hold'}
 
-        # PPO 动作
-        ppo_action, ppo_log_prob, ppo_value = self.ppo_agent.select_action(obs, explore=False)
+        # 为每个 Agent 单独对齐观测维度
+        def _align(obs, expected_dim):
+            if len(obs) != expected_dim:
+                if len(obs) > expected_dim:
+                    return obs[:expected_dim]
+                else:
+                    return np.pad(obs, (0, expected_dim - len(obs)), mode='constant')
+            return obs
 
-        # SAC 动作
-        sac_action, sac_log_prob = self.sac_agent.select_action(obs, evaluate=True)
+        obs_ppo = _align(obs, self.ppo_agent.state_dim)
+        obs_sac = _align(obs, self.sac_agent.state_dim)
+        obs_att = _align(obs, self.attention_ppo.state_dim)
 
-        # 根据市场状态选择
-        if self._market_regime == 'bull':
-            # 牛市：偏向 PPO (更稳定)
-            action = ppo_action
-            confidence = 0.7
-        elif self._market_regime == 'bear':
-            # 熊市：偏向 SAC (更保守)
-            action = sac_action
-            confidence = 0.7
+        # 各 Agent 决策
+        ppo_action, ppo_log_prob, ppo_value = self.ppo_agent.select_action(obs_ppo, explore=False)
+        sac_action, sac_log_prob = self.sac_agent.select_action(obs_sac, evaluate=True)
+        att_action, att_log_prob, att_value = self.attention_ppo.select_action(
+            obs_att, explore=False, regime=self._market_regime
+        )
+
+        # 根据 sac_as_default 和市场状态获取权重
+        if self.sac_as_default:
+            regime_weights = {
+                'bull':   {'sac': 0.40, 'ppo': 0.20, 'att': 0.40},
+                'bear':   {'sac': 0.60, 'ppo': 0.25, 'att': 0.15},
+                'sideways': {'sac': 0.50, 'ppo': 0.30, 'att': 0.20},
+                'neutral': {'sac': 0.50, 'ppo': 0.30, 'att': 0.20},
+            }
         else:
-            # 震荡：投票
-            if ppo_action == sac_action:
-                action = ppo_action
-                confidence = 0.8
-            else:
-                action = ppo_action  # 默认 PPO
-                confidence = 0.5
+            # 向后兼容: PPO 为主
+            regime_weights = {
+                'bull':   {'ppo': 0.40, 'sac': 0.20, 'att': 0.40},
+                'bear':   {'ppo': 0.25, 'sac': 0.60, 'att': 0.15},
+                'sideways': {'ppo': 0.30, 'sac': 0.30, 'att': 0.20},
+                'neutral': {'ppo': 0.30, 'sac': 0.30, 'att': 0.20},
+            }
+
+        regime_key = self._market_regime if self._market_regime in regime_weights else 'neutral'
+        weights = regime_weights[regime_key]
+
+        # 加权投票 (one-hot 向量累加)
+        action_map_inv = {'hold': 0, 'buy': 1, 'sell': 2}
+        votes = {'ppo': ppo_action, 'sac': sac_action, 'att': att_action}
+
+        weighted_scores = {0: 0.0, 1: 0.0, 2: 0.0}  # hold/buy/sell 总分
+        for agent_name, action_code in votes.items():
+            weighted_scores[action_code] += weights[agent_name]
+
+        # 多样性奖励: 如果多个 Agent 意见一致，额外加分
+        unique_actions = set(votes.values())
+        if len(unique_actions) == 1:
+            # 全票一致: +0.15 到共识动作
+            consensus_action = list(unique_actions)[0]
+            weighted_scores[consensus_action] += 0.15
+        elif len(unique_actions) == 2:
+            # 两票一致: +0.08 到多数动作
+            from collections import Counter
+            vote_counts = Counter(votes.values())
+            if vote_counts.most_common(1)[0][1] >= 2:
+                majority_action = vote_counts.most_common(1)[0][0]
+                weighted_scores[majority_action] += 0.08
+
+        # 选择得分最高的动作
+        action = max(weighted_scores, key=weighted_scores.get)
+
+        # 置信度: 基于得分分布计算
+        total_score = sum(weighted_scores.values())
+        if total_score > 0:
+            confidence = weighted_scores[action] / total_score
+        else:
+            confidence = 0.33
+
+        # 根据 regime 调整置信度上限
+        regime_confidence_cap = {'bull': 0.95, 'bear': 0.90, 'sideways': 0.85, 'neutral': 0.85}
+        confidence = min(confidence, regime_confidence_cap.get(regime_key, 0.85))
 
         action_map = {0: 'hold', 1: 'buy', 2: 'sell'}
+
+        # 统计投票
+        from collections import Counter
+        vote_counts = Counter(votes.values())
 
         return {
             'action': action_map.get(action, 'hold'),
             'action_code': action,
-            'confidence': confidence,
+            'confidence': round(confidence, 3),
             'market_regime': self._market_regime,
+            'agent_weights': weights,
+            'weighted_scores': {k: round(v, 4) for k, v in weighted_scores.items()},
             'ppo_action': action_map.get(ppo_action, 'hold'),
             'sac_action': action_map.get(sac_action, 'hold'),
+            'attention_ppo_action': action_map.get(att_action, 'hold'),
+            'agent_consensus': {action_map.get(k, k): v for k, v in vote_counts.items()},
+            'sac_default': self.sac_as_default,
+        }
+
+    def online_fine_tune(self, env: TradingEnvV2, n_episodes: int = 20) -> Dict:
+        """在线微调 (Phase 3 增强)"""
+        logger.info(f"[RLTraderV2] 在线微调: {n_episodes} episodes")
+        result = self.attention_ppo.online_fine_tune(env, n_episodes)
+        return {
+            'agent': 'attention_ppo',
+            **result,
+            'market_regime': self._market_regime,
         }
 
     def save(self):
-        """保存两个 Agent"""
+        """保存三个 Agent (Phase 3 增强)"""
         ppo_path = os.path.join(self.model_dir, 'ppo_agent.pkl')
         sac_path = os.path.join(self.model_dir, 'sac_agent.pkl')
+        att_path = os.path.join(self.model_dir, 'attention_ppo_agent.pkl')
 
         self.ppo_agent.save(ppo_path)
         self.sac_agent.save(sac_path)
+        self.attention_ppo.save(att_path)
 
-        return {'ppo': ppo_path, 'sac': sac_path}
+        return {'ppo': ppo_path, 'sac': sac_path, 'attention_ppo': att_path}
 
     def load(self):
-        """加载两个 Agent"""
+        """加载三个 Agent (Phase 3 增强)"""
         ppo_path = os.path.join(self.model_dir, 'ppo_agent.pkl')
         sac_path = os.path.join(self.model_dir, 'sac_agent.pkl')
+        att_path = os.path.join(self.model_dir, 'attention_ppo_agent.pkl')
 
         loaded = False
         if os.path.exists(ppo_path):
@@ -1181,10 +1670,13 @@ class RLTraderV2:
         if os.path.exists(sac_path):
             self.sac_agent = SACAgentV2.load(sac_path)
             loaded = True
+        if os.path.exists(att_path):
+            self.attention_ppo = AttentionPPOAgent.load(att_path)
+            loaded = True
 
         self._trained = loaded
         return loaded
 
 
-# 全局实例
-rl_trader_v2 = RLTraderV2()
+# 全局实例 (SAC 作为默认主 Agent)
+rl_trader_v2 = RLTraderV2(sac_as_default=True)

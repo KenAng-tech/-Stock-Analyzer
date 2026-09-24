@@ -1,0 +1,57 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+venv/
+.venv/
+
+# Backup files (10GB+)
+backup_*
+*.bak*
+*.bak
+*.orig
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Config (may contain secrets)
+config.local.json
+
+# Memory files
+memory/
+
+# Claude
+.claude/
+
+# Temporary
+/tmp/
+/temp/
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/

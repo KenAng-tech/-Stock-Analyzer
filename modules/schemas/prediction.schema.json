@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "modules/schemas/prediction.schema.json",
+  "title": "预测结果结构",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["model", "kelly", "sota_models"],
+  "properties": {
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "composite": { "type": "number" },
+        "ml_direction": { "enum": ["up", "down", "neutral"] },
+        "ml_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "ml_probabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "up": { "type": "number" },
+            "down": { "type": "number" },
+            "neutral": { "type": "number" }
+          }
+        },
+        "ml_trained": { "type": "boolean" }
+      }
+    },
+    "kelly": { "type": "object" },
+    "sota_models": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "direction": { "enum": ["up", "down", "neutral"] },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "sota_consensus": { "type": "object" },
+    "sota_agreement": { "type": "number" },
+    "sota_avg_confidence": { "type": "number" },
+    "weighted_target": { "type": "number" },
+    "upside_space": { "type": "number" },
+    "daily_volatility": { "type": "number" },
+    "month_volatility": { "type": "number" },
+    "drift_status": { "type": "string" }
+  }
+}

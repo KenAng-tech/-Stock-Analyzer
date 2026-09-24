@@ -150,6 +150,30 @@ class GraphFeatureExtractor:
 
     def __init__(self, embedding_dim: int = 32):
         self.embedding_dim = embedding_dim
+        # 尝试导入 PyTorch Geometric
+        self._torch = None
+        self._torch_geometric = None
+        self._try_import_pytorch_geometric()
+
+    def _try_import_pytorch_geometric(self):
+        """尝试导入 PyTorch Geometric"""
+        try:
+            import torch
+            self._torch = torch
+            try:
+                from torch_geometric.nn import GCNConv, GATConv, SAGEConv
+                from torch_geometric.data import Data
+                self._torch_geometric = {
+                    'GCNConv': GCNConv,
+                    'GATConv': GATConv,
+                    'SAGEConv': SAGEConv,
+                    'Data': Data,
+                }
+                logger.info("[GraphEncoder] PyTorch Geometric 已加载")
+            except ImportError:
+                logger.debug("[GraphEncoder] PyTorch Geometric 未安装，使用 NumPy 实现")
+        except ImportError:
+            logger.debug("[GraphEncoder] PyTorch 未安装")
 
     def pagerank_embedding(self, adj: np.ndarray,
                            damping: float = 0.85,
@@ -236,6 +260,97 @@ class GraphFeatureExtractor:
             # 回退: 用度中心性
             degrees = adj.sum(axis=1)
             return degrees.reshape(-1, 1) / (degrees.max() + 1e-10)
+
+    def gat_embedding(self, features: np.ndarray,
+                      adj: np.ndarray,
+                      n_heads: int = 4,
+                      hidden_dim: int = 16,
+                      rounds: int = 2) -> np.ndarray:
+        """
+        GAT (Graph Attention Network) 嵌入
+
+        使用多头注意力机制聚合邻居特征。
+        当 PyTorch Geometric 可用时使用真实 GAT 层，否则使用加权聚合。
+
+        Args:
+            features: (n, feature_dim)
+            adj: 归一化邻接矩阵 (n, n)
+            n_heads: 注意力头数
+            hidden_dim: 隐藏层维度
+            rounds: 聚合轮数
+
+        Returns:
+            图嵌入 (n, feature_dim * n_heads)
+        """
+        if self._torch_geometric is None:
+            # 使用加权聚合近似 GAT
+            return self._gat_approx(features, adj, n_heads, hidden_dim, rounds)
+
+        # 使用 PyTorch Geometric
+        import torch
+        import torch.nn.functional as F
+
+        n, feature_dim = features.shape
+        device = torch.device('cpu')
+
+        # 构建 PyG Data
+        edge_index = []
+        for i in range(n):
+            for j in range(n):
+                if adj[i, j] > 0:
+                    edge_index.append([i, j])
+        edge_index = torch.tensor(edge_index, dtype=torch.long).T
+
+        x = torch.tensor(features, dtype=torch.float32).to(device)
+        edge_attr = torch.tensor(adj[edge_index[0], edge_index[1]], dtype=torch.float32).unsqueeze(1).to(device)
+
+        # 构建 GAT 层
+        gnn = GATConv(
+            in_channels=feature_dim,
+            out_channels=hidden_dim,
+            heads=n_heads,
+            dropout=0.3,
+            edge_dim=1,
+        ).to(device)
+
+        # 前向传播
+        with torch.no_grad():
+            out = gnn(x, edge_index, edge_attr)
+            # 拼接多头输出
+            out = out.view(n, n_heads, hidden_dim)
+            out = out.mean(dim=1)  # 平均多头
+            return out.cpu().numpy()
+
+    def _gat_approx(self, features: np.ndarray,
+                    adj: np.ndarray,
+                    n_heads: int = 4,
+                    hidden_dim: int = 16,
+                    rounds: int = 2) -> np.ndarray:
+        """GAT 近似实现 (NumPy 版)"""
+        n, feature_dim = features.shape
+        results = []
+
+        for head in range(n_heads):
+            # 随机初始化注意力权重
+            W = np.random.randn(feature_dim, hidden_dim)
+            alpha = np.random.randn(feature_dim, 1)
+
+            for _ in range(rounds):
+                # 计算注意力系数
+                h = features @ W
+                e = np.tanh(features @ alpha)
+                e = np.broadcast_to(e, (n, n))
+
+                # 应用注意力
+                attention = np.exp(e * adj)
+                attention = attention / (attention.sum(axis=1, keepdims=True) + 1e-10)
+
+                # 聚合邻居特征
+                aggregated = attention @ h
+                results.append(aggregated)
+
+        # 拼接多头输出
+        return np.concatenate(results, axis=1)
 
 
 class GraphFeatureFusion:

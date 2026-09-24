@@ -1,0 +1,616 @@
+#!/usr/bin/env python3
+# -*- coding:utf-8 -*-
+"""
+DRL (Deep Reinforcement Learning) 交易代理
+
+实现 PPO (Proximal Policy Optimization) 交易代理:
+- State: 技术指标 + 持仓信息 + 市场状态
+- Action: 买入/卖出/持有 + 仓位比例
+- Reward: 夏普比率 + 回撤惩罚 + 交易成本
+
+兼容现有系统:
+- 返回与 ml_predictor.py 一致的预测格式
+- 支持 Regime-Switching 状态感知
+
+用法:
+    agent = DRLTradingAgent()
+    decision = agent.decide(klines, portfolio_state)
+"""
+
+import numpy as np
+import os
+import json
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from modules.logger import logger
+
+
+@dataclass
+class PortfolioState:
+    """投资组合状态"""
+    cash: float = 1000000.0
+    positions: Dict[str, Dict] = field(default_factory=dict)
+    total_value: float = 1000000.0
+    daily_return: float = 0.0
+    max_drawdown: float = 0.0
+    sharpe_ratio: float = 0.0
+
+
+@dataclass
+class TradingDecision:
+    """交易决策"""
+    action: str = 'hold'       # buy / sell / hold / close
+    stock_code: str = ''
+    quantity: int = 0
+    confidence: float = 0.0
+    reason: str = ''
+    target_weight: float = 0.0
+    stop_loss: float = 0.0
+    take_profit: float = 0.0
+
+
+class DRLTradingAgent:
+    """DRL 交易代理 (PPO 简化实现)
+
+    状态空间 (24 维):
+    - 技术指标 (12): RSI, MACD, KDJ_K, KDJ_D, KDJ_J, BB_position, ATR_pct,
+                     SMA_ratio_5, SMA_ratio_20, volume_ratio, return_5d, volatility_20d
+    - 持仓信息 (5): 仓位比例, 持仓收益, 持仓天数, 当日收益, 最大回撤
+    - 市场状态 (4): 上涨概率, 下跌概率, 中性概率, 市场波动率
+    - 时间特征 (3): 小时归一化, 星期归一化, 月份归一化
+
+    动作空间 (连续):
+    - action: -1.0 (全仓卖出) ~ +1.0 (全仓买入)
+    - confidence: 0.0 ~ 1.0
+
+    奖励函数:
+    - 收益奖励: portfolio_return * weight
+    - 夏普奖励: sharpe_ratio * weight
+    - 回撤惩罚: max_drawdown * penalty
+    - 交易成本: transaction_cost * cost_weight
+    """
+
+    STATE_DIM = 24
+    ACTION_DIM = 2
+
+    def __init__(self,
+                 learning_rate: float = 0.001,
+                 gamma: float = 0.99,
+                 epsilon_clip: float = 0.2,
+                 max_portfolio_weight: float = 0.8):
+        """
+        Args:
+            learning_rate: PPO 学习率
+            gamma: 折扣因子
+            epsilon_clip: PPO 裁剪参数
+            max_portfolio_weight: 最大仓位比例
+        """
+        self.lr = learning_rate
+        self.gamma = gamma
+        self.epsilon_clip = epsilon_clip
+        self.max_weight = max_portfolio_weight
+
+        # 简化策略网络 (线性策略 + softmax)
+        self._init_policy()
+
+        # 经验回放
+        self._episodes: List[Dict] = []
+        self._trained = False
+
+        logger.info(
+            f"[DRL] PPO 代理初始化: lr={self.lr}, gamma={self.gamma}, "
+            f"clip={self.epsilon_clip}, max_weight={self.max_weight}"
+        )
+
+    def _init_policy(self):
+        """初始化策略网络参数"""
+        np.random.seed(42)
+        # 简化: 线性策略 π(a|s) = softmax(Ws + b)
+        self.W_policy = np.random.randn(self.ACTION_DIM, self.STATE_DIM).astype(np.float32) * 0.01
+        self.b_policy = np.zeros(self.ACTION_DIM, dtype=np.float32)
+
+        # 价值网络 V(s) = w^T s + b
+        self.W_value = np.random.randn(self.STATE_DIM).astype(np.float32) * 0.01
+        self.b_value = 0.0
+
+    def _extract_state(self, klines: List[Dict], portfolio: PortfolioState) -> np.ndarray:
+        """从 K 线和持仓提取状态向量"""
+        if not klines or len(klines) < 20:
+            return np.zeros(self.STATE_DIM)
+
+        closes = np.array([k['close'] for k in klines[-30:]])
+        volumes = np.array([k.get('volume', 0) for k in klines[-30:]])
+
+        # 技术指标
+        rsi = self._calc_rsi(closes, 14)
+        macd = self._calc_macd(closes)
+        sma5 = closes[-5:].mean() if len(closes) >= 5 else closes[-1]
+        sma20 = closes[-20:].mean() if len(closes) >= 20 else closes[-1]
+        vol_ratio = volumes[-1] / (volumes[-5:].mean() + 1e-8)
+        ret_5 = (closes[-1] / closes[-5] - 1) if len(closes) >= 5 else 0
+        vol_20 = closes[-20:].std() / closes[-20:].mean() if len(closes) >= 20 else 0
+
+        # 持仓信息
+        pos_weight = sum(p.get('value', 0) for p in portfolio.positions.values()) / (portfolio.total_value + 1e-8)
+        pos_pnl = sum(p.get('unrealized_pnl', 0) for p in portfolio.positions.values()) / (portfolio.total_value + 1e-8)
+
+        state = np.array([
+            rsi / 100.0,          # 0: RSI 归一化
+            macd,                 # 1: MACD
+            pos_weight,           # 2: 仓位比例
+            pos_pnl,              # 3: 持仓收益率
+            portfolio.daily_return,  # 4: 当日收益
+            portfolio.max_drawdown,  # 5: 最大回撤
+            portfolio.sharpe_ratio / 5.0,  # 6: 夏普比率归一化
+            (sma5 / closes[-1] - 1) if closes[-1] > 0 else 0,  # 7: SMA5 偏离度
+            (sma20 / closes[-1] - 1) if closes[-1] > 0 else 0,  # 8: SMA20 偏离度
+            min(vol_ratio / 5.0, 1.0),  # 9: 成交量比率
+            min(ret_5 * 10, 1.0),     # 10: 5日收益率
+            min(vol_20 * 10, 1.0),    # 11: 波动率
+            # 市场状态 (简化)
+            0.5, 0.3, 0.2,  # 12-14: 上涨/下跌/中性概率
+            vol_20 * 10,     # 15: 市场波动率
+            # 时间特征
+            0.5, 0.5, 0.5,   # 16-18: 小时/星期/月份 (简化)
+            # 额外特征
+            min(ret_5 * 2, 1.0),    # 19: 短期动量
+            min(vol_ratio * 0.5, 1.0),  # 20: 量价背离
+            0.0, 0.0, 0.0,  # 21-23: 预留 (未来扩展)
+        ], dtype=np.float32)
+
+        return state
+
+    @staticmethod
+    def _calc_rsi(closes: np.ndarray, period: int = 14) -> float:
+        """计算 RSI"""
+        if len(closes) < period + 1:
+            return 50.0
+        deltas = np.diff(closes[-period - 1:])
+        gains = np.mean(deltas[deltas > 0]) if np.any(deltas > 0) else 0.0
+        losses = abs(np.mean(deltas[deltas < 0])) if np.any(deltas < 0) else 0.001
+        rs = gains / losses
+        return float(100.0 - 100.0 / (1.0 + rs)) / 100.0  # 归一化到 [0, 1]
+
+    @staticmethod
+    def _calc_macd(closes: np.ndarray) -> float:
+        """计算 MACD 信号"""
+        if len(closes) < 26:
+            return 0.0
+        ema12 = closes[-12:].mean() / closes[:12].mean() - 1
+        ema26 = closes[-26:].mean() / closes[:26].mean() - 1
+        return float(np.clip(ema12 - ema26, -1, 1))
+
+    def _policy(self, state: np.ndarray) -> Tuple[float, float]:
+        """策略网络: 给定状态, 输出动作"""
+        logits = self.W_policy @ state + self.b_policy
+
+        # Softmax
+        logits = logits - logits.max()
+        exp_logits = np.exp(logits)
+        probs = exp_logits / exp_logits.sum()
+
+        # 采样动作
+        action_idx = np.random.choice(len(probs), p=probs)
+
+        # 动作映射: 0=卖出, 1=买入
+        if action_idx == 0:
+            action = -np.random.uniform(0.3, 1.0)  # 卖出比例
+        else:
+            action = np.random.uniform(0.3, 1.0)   # 买入比例
+
+        confidence = float(probs.max())
+
+        return float(action), confidence
+
+    def _value(self, state: np.ndarray) -> float:
+        """价值网络: 估计状态价值"""
+        return float(self.W_value @ state + self.b_value)
+
+    def _calculate_risk_aware_reward(
+        self,
+        reward: float,
+        current_returns: List[float],
+        max_dd: float,
+        sharpe: Optional[float] = None,
+    ) -> float:
+        """
+        Risk-aware RL Reward 函数
+
+        优化目标: Sharpe Ratio - Penalty(MaxDD)
+
+        Args:
+            reward: 原始收益率 reward
+            current_returns: 历史收益率序列
+            max_dd: 当前最大回撤
+            sharpe: 当前 Sharpe Ratio (可选, 自动计算)
+
+        Returns:
+            risk_aware_reward: 风险调整后的 reward
+        """
+        if len(current_returns) < 10:
+            return reward  # 数据不足, 返回原始 reward
+
+        returns = np.array(current_returns)
+
+        # 计算 Sharpe Ratio (年化)
+        if sharpe is None:
+            mean_ret = np.mean(returns)
+            std_ret = np.std(returns) + 1e-8
+            sharpe = mean_ret / std_ret * np.sqrt(252)
+
+        # 计算 Sortino Ratio (只考虑下行波动)
+        downside_returns = returns[returns < 0]
+        if len(downside_returns) > 0:
+            downside_std = np.std(downside_returns) + 1e-8
+            sortino = (mean_ret / downside_std) * np.sqrt(252)
+        else:
+            sortino = sharpe  # 没有下行 = 同 Sharpe
+
+        # MaxDD 惩罚 (非线性: 回撤 > 10% 时惩罚急剧增加)
+        dd_penalty = 0.0
+        if max_dd > 0.10:
+            dd_penalty = 2.0 * (max_dd - 0.10)  # 超过 10% 后加速惩罚
+        elif max_dd > 0.05:
+            dd_penalty = 0.5 * (max_dd - 0.05)  # 5-10% 温和惩罚
+
+        # 组合 reward: 0.5 * Sharpe + 0.3 * Sortino - dd_penalty
+        risk_aware_reward = 0.5 * sharpe + 0.3 * sortino - dd_penalty
+
+        logger.debug(
+            f"[DRL] Risk-aware reward: sharpe={sharpe:.3f}, "
+            f"sortino={sortino:.3f}, max_dd={max_dd:.3f}, "
+            f"penalty={dd_penalty:.3f}, final={risk_aware_reward:.3f}"
+        )
+
+        return float(risk_aware_reward)
+
+    def decide(self,
+               klines: List[Dict],
+               portfolio: PortfolioState,
+               stock_code: str = '',
+               regime: Optional[Dict] = None) -> TradingDecision:
+        """
+        做出交易决策
+
+        Args:
+            klines: K 线数据
+            portfolio: 投资组合状态
+            stock_code: 股票代码
+            regime: 市场状态 (来自 Regime-Switching)
+
+        Returns:
+            TradingDecision
+        """
+        state = self._extract_state(klines, portfolio)
+
+        # 市场状态感知调整
+        if regime:
+            regime_conf = regime.get('confidence', 0.5)
+            if regime.get('regime') == 'volatile':
+                # 波动市场中降低仓位
+                action, confidence = self._policy(state)
+                action *= (1.0 - regime_conf * 0.3)  # 降低 30%
+            elif regime.get('regime') == 'trending':
+                # 趋势市场中加大仓位
+                action, confidence = self._policy(state)
+                action *= (1.0 + regime_conf * 0.2)  # 增加 20%
+            else:
+                action, confidence = self._policy(state)
+        else:
+            action, confidence = self._policy(state)
+
+        # 限制仓位
+        action = np.clip(action, -self.max_weight, self.max_weight)
+
+        # 确定动作类型
+        if action > 0.1:
+            action_type = 'buy'
+            quantity = int(portfolio.cash * action / (klines[-1]['close'] + 1e-8))
+            quantity = max(0, min(quantity, int(portfolio.cash * self.max_weight / (klines[-1]['close'] + 1e-8))))
+        elif action < -0.1:
+            action_type = 'sell'
+            quantity = int(portfolio.total_value * abs(action) / (klines[-1]['close'] + 1e-8))
+        else:
+            action_type = 'hold'
+            quantity = 0
+
+        # 止损止盈
+        current_price = klines[-1]['close']
+        atr = np.mean([
+            max(k['high'] - k['low'],
+                abs(k['high'] - k.get('prev_close', k['close'])),
+                abs(k['low'] - k.get('prev_close', k['close'])))
+            for k in klines[-14:]
+        ]) if len(klines) >= 14 else current_price * 0.02
+
+        stop_loss = current_price - 2 * atr
+        take_profit = current_price + 3 * atr
+
+        reason = f"DRL PPO: action={action:.3f}, conf={confidence:.3f}"
+        if regime:
+            reason += f", regime={regime.get('regime', 'unknown')}"
+
+        return TradingDecision(
+            action=action_type,
+            stock_code=stock_code,
+            quantity=quantity,
+            confidence=confidence,
+            reason=reason,
+            target_weight=abs(action),
+            stop_loss=round(stop_loss, 2),
+            take_profit=round(take_profit, 2),
+        )
+
+    def train_step(self, states: np.ndarray, actions: np.ndarray,
+                   rewards: np.ndarray, next_states: np.ndarray,
+                   dones: np.ndarray,
+                   advantage_clip: float = 1.0) -> Dict:
+        """
+        PPO 训练步骤 (优化版 — 优势归一化 + 梯度裁剪)
+
+        Args:
+            states: 状态序列
+            actions: 动作序列
+            rewards: 奖励序列
+            next_states: 下一状态序列
+            dones: 终止标记
+            advantage_clip: 优势裁剪阈值 (防止极端值)
+
+        Returns:
+            训练统计 {policy_loss, value_loss, entropy}
+        """
+        n_steps = len(rewards)
+        if n_steps == 0:
+            return {'policy_loss': 0, 'value_loss': 0, 'entropy': 0}
+
+        # 计算 GAE (Generalized Advantage Estimation)
+        lambd = 0.95
+        advantages = np.zeros(n_steps, dtype=np.float64)
+        last_gae = 0.0
+
+        for t in reversed(range(n_steps)):
+            next_value = self._value(next_states[t]) if not dones[t] else 0.0
+            delta = rewards[t] + self.gamma * next_value * (1 - dones[t]) - self._value(states[t])
+            advantages[t] = delta + self.gamma * lambd * (1 - dones[t]) * last_gae
+            last_gae = advantages[t]
+
+        # ── 优势归一化 (标准化) ─────────────────────────────────
+        # 防止优势值过大导致策略损失波动
+        adv_mean = np.mean(advantages)
+        adv_std = np.std(advantages) + 1e-8
+        advantages_normalized = (advantages - adv_mean) / adv_std
+
+        # 裁剪优势防止极端值
+        advantages_clipped = np.clip(advantages_normalized, -advantage_clip, advantage_clip)
+
+        # ── 更新价值网络 ─────────────────────────────────────────
+        values = np.array([self._value(s) for s in states], dtype=np.float64)
+        # TD target: R + gamma * V(s') - V(s)
+        next_values = np.array([
+            self._value(next_states[i]) * (1 - dones[i]) for i in range(n_steps)
+        ], dtype=np.float64)
+        targets = rewards + self.gamma * next_values
+        td_error = targets - values
+        # 梯度更新 (带梯度裁剪)
+        grad_value = np.mean(td_error[:, np.newaxis] * states, axis=0)
+        grad_value = np.clip(grad_value, -1.0, 1.0)  # 梯度裁剪
+        self.W_value -= self.lr * grad_value
+        self.b_value -= self.lr * np.mean(td_error)
+
+        # ── 更新策略网络 (REINFORCE with baseline, 优势归一化) ──
+        grad_policy = np.zeros_like(self.W_policy, dtype=np.float64)
+        for i in range(n_steps):
+            if not dones[i]:
+                grad_policy += advantages_clipped[i] * states[i][np.newaxis, :]
+        # 移除原来的 0.01 小学习率，直接使用 lr
+        grad_policy = np.clip(grad_policy, -1.0, 1.0)  # 梯度裁剪
+        self.W_policy += self.lr * grad_policy
+
+        self._trained = True
+
+        return {
+            'policy_loss': float(np.mean(advantages_clipped ** 2)),
+            'value_loss': float(np.mean((targets - values) ** 2)),
+            'entropy': float(np.mean(np.abs(advantages_clipped))),
+            'mean_reward': float(np.mean(rewards)),
+            'adv_std': float(adv_std),
+            'adv_mean': float(adv_mean),
+        }
+
+    def store_episode(self, state, action, reward, next_state, done):
+        """存储经验"""
+        self._episodes.append({
+            'state': state, 'action': action, 'reward': reward,
+            'next_state': next_state, 'done': done,
+        })
+
+    def train(self, env_data: Dict, epochs: int = 50, batch_size: int = 32) -> Dict:
+        """
+        训练 DRL 代理
+
+        Args:
+            env_data: {'features': np.ndarray, 'labels': np.ndarray, 'seq_len': int, 'n_features': int}
+            epochs: 训练轮数
+            batch_size: 批大小
+        """
+        features = env_data['features']
+        labels = env_data['labels']
+        n_samples = len(features)
+
+        logger.info(f"[DRL] 训练代理: {n_samples} 样本, {epochs} epochs, batch_size={batch_size}")
+
+        for epoch in range(epochs):
+            # 采样一批数据
+            indices = np.random.choice(n_samples - 1, size=batch_size, replace=False)
+            states = features[indices]
+            next_states = features[indices + 1]
+
+            # 将状态展平为 STATE_DIM 维
+            if states.ndim == 3:
+                states = states.reshape(states.shape[0], -1)[:, :self.STATE_DIM]
+                next_states = next_states.reshape(next_states.shape[0], -1)[:, :self.STATE_DIM]
+            elif states.shape[1] < self.STATE_DIM:
+                # 2D 特征矩阵，需要填充
+                states = np.pad(states, ((0, 0), (0, self.STATE_DIM - states.shape[1])))
+                next_states = np.pad(next_states, ((0, 0), (0, self.STATE_DIM - next_states.shape[1])))
+
+            # 生成动作 (基于当前策略)
+            actions = np.array([self._policy(s)[0] for s in states])
+
+            # 计算奖励 (Risk-aware RL: Sharpe + Sortino - MaxDD Penalty)
+            label_vals = labels[indices].astype(np.float64)
+            # 归一化标签到 [-1, 1], 添加平滑
+            base_rewards = np.tanh(label_vals * 0.5)
+            # 根据动作方向调整奖励 (买入时上涨奖励更高, 卖出时下跌奖励更高)
+            for i in range(batch_size):
+                if actions[i] > 0.1:  # 买入
+                    base_rewards[i] *= (1.0 + abs(actions[i]) * 0.3)
+                elif actions[i] < -0.1:  # 卖出
+                    base_rewards[i] *= (1.0 + abs(actions[i]) * 0.3)
+
+            # 从历史 episodes 提取收益率序列, 计算风险指标
+            all_returns = [e['reward'] for e in self._episodes]
+            all_returns.extend(base_rewards.tolist())
+
+            # 计算累计收益曲线的最大回撤
+            equity = np.cumprod(1.0 + np.array(all_returns))
+            running_max = np.maximum.accumulate(equity)
+            drawdowns = (equity - running_max) / running_max
+            current_max_dd = float(-np.min(drawdowns)) if len(drawdowns) > 0 else 0.0
+
+            # 对每个样本应用 risk-aware reward
+            rewards = np.zeros(batch_size, dtype=np.float64)
+            for i in range(batch_size):
+                rewards[i] = self._calculate_risk_aware_reward(
+                    reward=float(base_rewards[i]),
+                    current_returns=all_returns[-min(len(all_returns), 252):],
+                    max_dd=current_max_dd,
+                )
+
+            dones = np.zeros(batch_size, dtype=bool)
+            dones[-1] = True  # 最后一个为终止状态
+
+            # 训练步骤
+            result = self.train_step(states, actions, rewards, next_states, dones)
+
+            if epoch % 10 == 0:
+                logger.info(
+                    f"[DRL] Epoch {epoch}/{epochs} | "
+                    f"Policy Loss: {result['policy_loss']:.4f} | "
+                    f"Value Loss: {result['value_loss']:.4f} | "
+                    f"Mean Reward: {result['mean_reward']:.4f} | "
+                    f"Adv Std: {result['adv_std']:.4f}"
+                )
+
+        self._trained = True
+        logger.info("[DRL] 训练完成")
+        return result
+
+    def save(self, path: Optional[str] = None) -> bool:
+        """保存模型 — 使用 numpy 原生格式 (无需 torch)"""
+        if path is None:
+            path = os.path.join(os.path.dirname(__file__), 'dl_models', 'drl_agent.npy')
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            data = self.to_dict()
+            # 将 numpy 数组转为列表用于 JSON 序列化
+            data['W_policy'] = self.W_policy.tolist()
+            data['b_policy'] = self.b_policy.tolist()
+            data['W_value'] = self.W_value.tolist()
+            data['b_value'] = float(self.b_value)
+            np.save(path, {
+                'config': data,
+                'weights': {
+                    'W_policy': self.W_policy,
+                    'b_policy': self.b_policy,
+                    'W_value': self.W_value,
+                    'b_value': np.array(self.b_value),
+                }
+            })
+            logger.info(f"[DRL] 模型已保存: {path} ({os.path.getsize(path) // 1024} KB)")
+            return True
+        except Exception as e:
+            logger.error(f"[DRL] 保存失败: {e}")
+            return False
+
+    def to_dict(self) -> Dict:
+        """序列化 — 包含实际权重"""
+        return {
+            'model_type': 'DRLTradingAgent',
+            'state_dim': self.STATE_DIM,
+            'action_dim': self.ACTION_DIM,
+            'lr': self.lr,
+            'gamma': self.gamma,
+            'epsilon_clip': self.epsilon_clip,
+            'max_weight': self.max_weight,
+            'trained': self._trained,
+            'n_episodes': len(self._episodes),
+            # 实际权重 (用于持久化)
+            'W_policy': self.W_policy.tolist(),
+            'b_policy': self.b_policy.tolist(),
+            'W_value': self.W_value.tolist(),
+            'b_value': self.b_value,
+        }
+
+    @classmethod
+    def from_dict(cls, config: Dict) -> 'DRLTradingAgent':
+        """加载 — 恢复实际权重"""
+        agent = cls(
+            learning_rate=config.get('lr', 0.001),
+            gamma=config.get('gamma', 0.99),
+            epsilon_clip=config.get('epsilon_clip', 0.2),
+            max_portfolio_weight=config.get('max_weight', 0.8),
+        )
+        agent._trained = config.get('trained', False)
+        # 恢复权重
+        if 'W_policy' in config:
+            agent.W_policy = np.array(config['W_policy'], dtype=np.float32)
+        if 'b_policy' in config:
+            agent.b_policy = np.array(config['b_policy'], dtype=np.float32)
+        if 'W_value' in config:
+            agent.W_value = np.array(config['W_value'], dtype=np.float32)
+        if 'b_value' in config:
+            agent.b_value = float(config['b_value'])
+        return agent
+
+    @classmethod
+    def load(cls, path: Optional[str] = None) -> 'DRLTradingAgent':
+        """从 numpy 文件加载模型"""
+        if path is None:
+            path = os.path.join(os.path.dirname(__file__), 'dl_models', 'drl_agent.npy')
+        if not os.path.exists(path):
+            logger.warning(f"[DRL] 模型文件不存在: {path}，创建新代理")
+            return cls()
+        try:
+            data = np.load(path, allow_pickle=True).item()
+            config = data.get('config', {})
+            weights = data.get('weights', {})
+            agent = cls.from_dict(config)
+            if weights:
+                agent.W_policy = weights['W_policy']
+                agent.b_policy = weights['b_policy']
+                agent.W_value = weights['W_value']
+                agent.b_value = float(weights['b_value'])
+            logger.info(f"[DRL] 模型已加载: {path} ({os.path.getsize(path) // 1024} KB)")
+            return agent
+        except Exception as e:
+            logger.error(f"[DRL] 加载失败: {e}，创建新代理")
+            return cls()
+
+
+# 全局单例
+_agent: Optional[DRLTradingAgent] = None
+
+
+def get_drl_agent() -> DRLTradingAgent:
+    """获取 DRL 代理全局实例 — 自动加载已训练的权重"""
+    global _agent
+    if _agent is None:
+        _agent = DRLTradingAgent.load()
+    return _agent
+
+
+def reset_drl_agent():
+    """重置全局实例"""
+    global _agent
+    _agent = None

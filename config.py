@@ -6,8 +6,11 @@
 import json
 import os
 import time
+import logging
 from typing import Dict, Any, Optional
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 CONFIG_DIR = Path(__file__).parent
 CONFIG_FILE = CONFIG_DIR / 'config.json'
@@ -17,7 +20,7 @@ CONFIG_FILE = CONFIG_DIR / 'config.json'
 DEFAULT_CONFIG = {
     # 服务器配置
     'server': {
-        'host': '0.0.0.0',
+        'host': '127.0.0.1',
         'port': 5002,
         'debug': False,
         'threaded': True,
@@ -122,7 +125,7 @@ class ConfigManager:
                 # 合并配置
                 self._merge_config(self._config, user_config)
         except Exception as e:
-            print(f"[Config] 加载配置失败: {e}")
+            logger.warning(f"[Config] 加载配置失败: {e}")
         
         self._last_load = now
         return self._config
@@ -133,7 +136,7 @@ class ConfigManager:
             with open(self._config_file, 'w') as f:
                 json.dump(self._config, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            print(f"[Config] 保存配置失败: {e}")
+            logger.warning(f"[Config] 保存配置失败: {e}")
     
     def get(self, key: str, default: Any = None) -> Any:
         """获取配置项"""

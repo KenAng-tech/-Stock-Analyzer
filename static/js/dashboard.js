@@ -1,33 +1,107 @@
 // Stock Analyzer - Dashboard JavaScript (量化模型面板)
 // 为"量化模型"标签页提供所有前端交互逻辑
-// API_BASE 已由 app.js 在全局作用域定义，此处直接使用
+// API_BASE 和 _activeApiRequests 已由 core.js 在全局作用域定义
 
 // ═══════════════════════════════════════════════════
 // 工具函数
 // ═══════════════════════════════════════════════════
 
+// _activeApiRequests 和 _globalLoadingTimer 已由 core.js 定义，此处复用
+
+function _incApiRequests() {
+    _activeApiRequests++;
+    clearTimeout(_globalLoadingTimer);
+    _globalLoadingTimer = setTimeout(() => {
+        const overlay = document.getElementById('global-loading-overlay');
+        if (overlay) overlay.classList.add('active');
+    }, 300);  // 300ms 延迟才显示全局 loading，避免闪烁
+}
+
+function _decApiRequests() {
+    _activeApiRequests = Math.max(0, _activeApiRequests - 1);
+    if (_activeApiRequests <= 0) {
+        clearTimeout(_globalLoadingTimer);
+        const overlay = document.getElementById('global-loading-overlay');
+        if (overlay) overlay.classList.remove('active');
+    }
+}
+
+/**
+ * Dashboard API 请求包装器 (Phase 2: 集成 API Key + 超时保护)
+ * 替代原生 fetch，自动附加 X-API-Key 头
+ */
 async function apiGet(url, timeoutMs = 10000) {
+    _incApiRequests();
     try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), timeoutMs);
-        const resp = await fetch(url, { signal: controller.signal });
+        const headers = {};
+        const key = typeof getApiKey === 'function' ? getApiKey() : '';
+        if (key) headers['X-API-Key'] = key;
+        const resp = await fetch(url, {
+            signal: controller.signal,
+            headers,
+        });
         clearTimeout(timeout);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(`HTTP ${resp.status}: ${text.slice(0, 100)}`);
+        }
         return await resp.json();
     } catch (e) {
         console.error(`[Dashboard API] ${url} 请求失败:`, e.message);
         return null;
+    } finally {
+        _decApiRequests();
     }
 }
 
-function showLoading(containerId) {
+// 添加全局 loading overlay 到 body
+(function initGlobalLoading() {
+    const overlay = document.createElement('div');
+    overlay.id = 'global-loading-overlay';
+    overlay.className = 'loading-overlay';
+    overlay.innerHTML = `
+        <div class="spinner"></div>
+        <div class="loading-text">正在加载数据...</div>
+    `;
+    document.body.appendChild(overlay);
+})();
+
+function showLoading(containerId, text = '加载中...') {
     const el = document.getElementById(containerId);
-    if (el) el.innerHTML = '<div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>';
+    if (el) {
+        el.innerHTML = `
+            <div class="panel-loading">
+                <div class="spinner-icon"></div>
+                <div class="loading-text">${text}</div>
+                <div class="loading-progress">
+                    <div class="progress-bar"></div>
+                </div>
+            </div>`;
+    }
 }
 
-function showError(containerId, message) {
+function showError(containerId, message, retryFn = null) {
     const el = document.getElementById(containerId);
-    if (el) el.innerHTML = `<div class="error"><i class="fas fa-exclamation-triangle"></i> ${message}</div>`;
+    if (!el) return;
+    let retryHtml = '';
+    if (retryFn) {
+        retryHtml = `<button class="retry-btn" onclick="(${retryFn.toString()})()">重试</button>`;
+    }
+    el.innerHTML = `
+        <div class="error">
+            <i class="fas fa-exclamation-triangle"></i>
+            <div>${message}</div>
+            ${retryHtml}
+        </div>`;
+}
+
+function showEmpty(containerId, message = '暂无数据') {
+    const el = document.getElementById(containerId);
+    if (el) {
+        el.innerHTML = `<div class="loading"><div class="spinner-icon"></div>${message}</div>`;
+    }
 }
 
 // ═══════════════════════════════════════════════════
@@ -376,9 +450,9 @@ async function loadFactorQualityPanel() {
 // ═══════════════════════════════════════════════════
 
 async function loadRiskReport() {
-    showLoading('risk-panel');
+    showLoading('risk-report-panel');
     const data = await apiGet(`${API_BASE}/api/dashboard/risk-report`);
-    const container = document.getElementById('risk-panel');
+    const container = document.getElementById('risk-report-panel');
 
     if (!data || !container) return;
 
@@ -551,15 +625,53 @@ async function loadBacktestPanel(code) {
 }
 
 // ═══════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════
+// 系统运维 - 模型健康面板 (health-panel)
+// ═══════════════════════════════════════════════════
+
+async function loadHealthPanel() {
+    const container = document.getElementById('health-panel');
+    if (!container) return;
+
+    try {
+        const resp = await apiGet(`${API_BASE}/api/health`);
+        if (!resp) {
+            container.innerHTML = '<div style="color:#94a3b8;font-size:13px;">健康检查不可用</div>';
+            return;
+        }
+
+        const d = resp.data || resp;
+        let html = '<div style="font-size:13px;">';
+        const statusColor = d.status === 'healthy' ? '#10b981' : '#f59e0b';
+        html += `<div style="text-align:center;padding:8px;background:rgba(15,23,42,0.5);border-radius:6px;margin-bottom:8px;">`;
+        html += `<div style="font-size:12px;color:#94a3b8;">服务器状态</div>`;
+        html += `<div style="font-size:18px;font-weight:700;color:${statusColor};">${d.status || 'unknown'}</div>`;
+        html += `</div>`;
+        html += `<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);">Python: ${d.python || '--'}</div>`;
+        html += `<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);">平台: ${d.server?.platform || d.platform || '--'}</div>`;
+        html += `<div style="padding:4px 0;">GPU: ${d.gpu?.mps_available ? 'MPS ✅' : d.gpu?.cuda_available ? 'CUDA ✅' : '无'}</div>`;
+        html += '</div>';
+        container.innerHTML = html;
+
+    } catch (e) {
+        console.error('loadHealthPanel error:', e);
+        container.innerHTML = `<div style="color:#ef4444;font-size:13px;">加载失败: ${e.message}</div>`;
+    }
+}
+
 // 模型健康面板
 // ═══════════════════════════════════════════════════
 
 async function loadModelHealthPanel() {
-    showLoading('health-panel');
-    const data = await apiGet(`${API_BASE}/api/dashboard/model-health`);
-    const container = document.getElementById('health-panel');
+    showLoading('model-health-panel', '正在加载模型健康状态...');
+    try {
+        const data = await apiGet(`${API_BASE}/api/dashboard/model-health`);
+        const container = document.getElementById('model-health-panel');
 
-    if (!data || !container) return;
+        if (!data || !container) {
+            showError('model-health-panel', '数据加载失败，请检查网络连接', 'loadModelHealthPanel');
+            return;
+        }
 
     const ml = data.ml_report || {};
     const health = data.health || {};
@@ -611,6 +723,12 @@ async function loadModelHealthPanel() {
     })() : ''}
         </div>`;
     container.innerHTML = html;
+    } catch (e) {
+        const container = document.getElementById('model-health-panel');
+        if (container) {
+            showError('model-health-panel', '模型健康加载失败: ' + e.message, 'loadModelHealthPanel');
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════
@@ -652,7 +770,7 @@ async function loadHyperparamsPanel() {
 
 async function runHyperparamOptimization() {
     const btn = event.target;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 优化中...';
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 启动中...';
     btn.disabled = true;
 
     const resp = await fetch(`${API_BASE}/api/dashboard/hyperparams`, {
@@ -662,11 +780,18 @@ async function runHyperparamOptimization() {
     });
 
     const data = await resp.json();
-    btn.innerHTML = '<i class="fas fa-check"></i> 完成';
 
-    if (data.best_params) {
+    if (data.status === 'started') {
+        btn.innerHTML = '<i class="fas fa-hourglass-half"></i> 优化已启动 (约 15-35 分钟)，稍后刷新查看';
+    } else if (data.status === 'running') {
+        btn.innerHTML = '<i class="fas fa-hourglass-half"></i> 已有调参任务在运行';
+    } else if (data.best_params) {
+        btn.innerHTML = '<i class="fas fa-check"></i> 完成';
         loadHyperparamsPanel();
+    } else {
+        btn.innerHTML = '<i class="fas fa-exclamation-triangle"></i> 启动失败，点击重试';
     }
+    btn.disabled = false;
 }
 
 // ═══════════════════════════════════════════════════
@@ -675,7 +800,7 @@ async function runHyperparamOptimization() {
 
 async function loadSentimentPanel(code) {
     showLoading('sentiment-panel');
-    const data = await apiGet(`${API_BASE}/api/dashboard/sentiment?code=${code}`);
+    const data = await apiGet(`${API_BASE}/api/dashboard/sentiment?code=${code}`, 25000);
     const container = document.getElementById('sentiment-panel');
 
     if (!data || !container) return;
@@ -711,6 +836,17 @@ async function loadSentimentPanel(code) {
 // 量化模型标签页加载器
 // ═══════════════════════════════════════════════════
 
+function switchQuantTab(group) {
+    // 切换子 Tab 样式
+    document.querySelectorAll('#quantSubTabs .quant-sub-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.group === group);
+    });
+    // 切换面板组可见性
+    document.querySelectorAll('.quant-panel-group').forEach(g => {
+        g.classList.toggle('active', g.id === `group-${group}`);
+    });
+}
+
 function loadQuantModelTab(code) {
     // 自动获取主页股票代码输入框，未找到则默认 sz300620
     if (!code) {
@@ -728,6 +864,13 @@ function loadQuantModelTab(code) {
     loadHyperparamsPanel();
     loadQualityPanel(code);
     loadDLV2Panel(code);  // 深度学习 V2
+    loadTimeLLMPanel(code);  // Time-LLM 统一预测
+    loadRegimeSwitchingPanel(code);  // Regime-Switching 多模型
+    loadCVaRPositionPanel(code);  // CVaR 仓位管理
+    loadHealthPanel(code);   // 模型健康 & 版本
+    loadMLOpsPanel(code);  // MLOps 管道
+    loadFusionPanel(code);  // P0-5 多模态融合预测
+    loadCanaryPanel();       // P0-6 金丝雀部署
 }
 
 // ═══════════════════════════════════════════════════
@@ -827,10 +970,16 @@ function refreshQuantModel() {
     loadQuantModelTab(getCurrentStockCode());
 }
 
+/**
+ * 获取当前股票代码 (Phase 2: thscode 消歧)
+ * 自动标准化: "300620" → "sz300620", "300620.SZ" → "sz300620"
+ */
 function getCurrentStockCode() {
     const codeInput = document.getElementById('stockCode');
-    if (codeInput) return codeInput.value.trim() || 'sz300620';
-    return 'sz300620';
+    const raw = codeInput ? codeInput.value.trim() : '';
+    const code = raw || 'sz300620';
+    // Phase 2: thscode 消歧
+    return typeof normalizeStockCode === 'function' ? normalizeStockCode(code) : code;
 }
 
 // ═══════════════════════════════════════════════════
@@ -844,13 +993,14 @@ async function loadDLV2Panel(code) {
     container.innerHTML = '<div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载深度学习模型...</div>';
 
     try {
-        // 并行加载多个 API
-        const [predRes, rlRes, sentimentRes, reportRes] = await Promise.all([
+        // 并行加载多个 API (使用 allSettled 防止单个失败导致整体失败)
+        const results = await Promise.allSettled([
             apiGet(`${API_BASE}/api/dl/predict/${code}`),
             apiGet(`${API_BASE}/api/rl/trader/status`),
-            apiGet(`${API_BASE}/api/sentiment/bert/${code}`),
+            apiGet(`${API_BASE}/api/sentiment/bert/${code}`, 25000),
             apiGet(`${API_BASE}/api/dl/ensemble/report`)
         ]);
+        const [predRes, rlRes, sentimentRes, reportRes] = results.map(r => r.status === 'fulfilled' ? r.value : null);
 
         // 深度学习预测
         let dlHtml = '<div class="dl-v2-grid">';
@@ -864,7 +1014,9 @@ async function loadDLV2Panel(code) {
                 <div class="dl-card-body">
         `;
 
-        if (predRes && predRes.success && predRes.prediction) {
+        // 兼容 data.data 嵌套和直接返回格式
+        const pred = predRes?.prediction || predRes?.data?.prediction;
+        if (pred) {
             const p = predRes.prediction;
             const dirClass = p.direction === 'up' ? 'bullish' : p.direction === 'down' ? 'bearish' : 'neutral';
             const dirText = p.direction === 'up' ? '看涨' : p.direction === 'down' ? '看跌' : '中性';
@@ -953,8 +1105,11 @@ async function loadDLV2Panel(code) {
                 <div class="dl-card-body">
         `;
 
-        if (sentimentRes && sentimentRes.sentiment) {
-            const s = sentimentRes.sentiment;
+        // 2026-09-10 形状断修复: 原读 s.positive/neutral/negative (后端真实
+        // 契约已无这些扁平键) → NaN% 渲染; 现对齐 engine.get_sentiment_score
+        // 契约 {score, label, confidence, n_articles, method}; 无舆情诚实空态
+        const s = sentimentRes && sentimentRes.sentiment;
+        if (s && (s.n_articles ?? 0) > 0 && typeof s.score === 'number') {
             const score = s.score || 0;
             const sentimentClass = score > 0.15 ? 'positive' : score < -0.15 ? 'negative' : 'neutral';
             const sentimentText = score > 0.15 ? '正面' : score < -0.15 ? '负面' : '中性';
@@ -965,22 +1120,19 @@ async function loadDLV2Panel(code) {
                     <div class="dl-sentiment-label">${sentimentText}</div>
                 </div>
                 <div class="dl-sentiment-breakdown">
-                    <div class="dl-sb-item positive">
-                        <div class="dl-sb-value" style="color:#10b981">${(s.positive * 100).toFixed(0)}%</div>
-                        <div class="dl-sb-label">正面</div>
-                    </div>
                     <div class="dl-sb-item neutral">
-                        <div class="dl-sb-value" style="color:#d29922">${(s.neutral * 100).toFixed(0)}%</div>
-                        <div class="dl-sb-label">中性</div>
+                        <div class="dl-sb-value" style="color:#d29922">${s.n_articles}</div>
+                        <div class="dl-sb-label">舆情 ${s.method || 'finbert'}</div>
                     </div>
-                    <div class="dl-sb-item negative">
-                        <div class="dl-sb-value" style="color:#f85149">${(s.negative * 100).toFixed(0)}%</div>
-                        <div class="dl-sb-label">负面</div>
+                    <div class="dl-sb-item positive">
+                        <div class="dl-sb-value" style="color:#10b981">${(((s.confidence ?? 0) * 100) || 0).toFixed(0)}%</div>
+                        <div class="dl-sb-label">置信</div>
                     </div>
                 </div>
             `;
         } else {
-            dlHtml += '<div class="dl-no-data">情感数据不可用</div>';
+            const empty = (s && (s.n_articles ?? 0) === 0) ? '情感数据不可用 (新闻0/股吧0)' : '情感数据不可用';
+            dlHtml += `<div class="dl-no-data">${empty}</div>`;
         }
 
         dlHtml += `
@@ -1045,3 +1197,785 @@ async function loadDLV2Panel(code) {
         container.innerHTML = '<div class="dl-error">加载失败：' + e.message + '</div>';
     }
 }
+
+// ═══════════════════════════════════════════════════
+// Time-LLM 统一预测面板
+// ═══════════════════════════════════════════════════
+
+async function loadTimeLLMPanel(code) {
+    const container = document.getElementById('time-llm-panel');
+    if (!container) return;
+
+    container.innerHTML = '<div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载 Time-LLM...</div>';
+
+    try {
+        const [predRes, statusRes] = await Promise.all([
+            apiGet(`${API_BASE}/api/time-llm/predict/${code}`),
+            apiGet(`${API_BASE}/api/time-llm/status`)
+        ]);
+
+        let html = '<div class="dl-v2-grid">';
+
+        // 预测卡片
+        if (predRes && predRes.success && predRes.data) {
+            const p = predRes.data;
+            const dirClass = p.direction === 'bullish' ? 'bullish' : p.direction === 'bearish' ? 'bearish' : 'neutral';
+            const dirText = p.direction === 'up' ? '看涨' : p.direction === 'down' ? '看跌' : p.direction === 'bearish' ? '看跌' : '中性';
+
+            html += `
+                <div class="dl-card">
+                    <div class="dl-card-header">
+                        <i class="fas fa-clock"></i> Time-LLM 预测
+                    </div>
+                    <div class="dl-card-body">
+                        <div class="dl-prediction-main ${dirClass}">
+                            <div class="dl-direction">${dirText}</div>
+                            <div class="dl-confidence">置信度 ${(p.confidence * 100).toFixed(1)}%</div>
+                        </div>
+                        <div class="dl-prob-bars">
+                            <div class="dl-prob-row">
+                                <span>上涨</span>
+                                <div class="dl-prob-fill" style="width:${(p.probabilities?.up || 0) * 100}%"></div>
+                                <span>${((p.probabilities?.up || 0) * 100).toFixed(1)}%</span>
+                            </div>
+                            <div class="dl-prob-row">
+                                <span>中性</span>
+                                <div class="dl-prob-fill neutral" style="width:${(p.probabilities?.neutral || 0) * 100}%"></div>
+                                <span>${((p.probabilities?.neutral || 0) * 100).toFixed(1)}%</span>
+                            </div>
+                            <div class="dl-prob-row">
+                                <span>下跌</span>
+                                <div class="dl-prob-fill bearish" style="width:${(p.probabilities?.down || 0) * 100}%"></div>
+                                <span>${((p.probabilities?.down || 0) * 100).toFixed(1)}%</span>
+                            </div>
+                        </div>
+                        <div class="dl-rl-info" style="margin-top: 12px;">
+                            <div class="dl-info-row">
+                                <span>市场状态:</span>
+                                <span>${p.market_regime || '未知'}</span>
+                            </div>
+                            <div class="dl-info-row">
+                                <span>执行时间:</span>
+                                <span>${(p.execution_time_ms || 0).toFixed(0)}ms</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        } else {
+            html += `
+                <div class="dl-card">
+                    <div class="dl-card-header">
+                        <i class="fas fa-clock"></i> Time-LLM 预测
+                    </div>
+                    <div class="dl-card-body">
+                        <div class="dl-no-data">预测数据不可用</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // 模型状态卡片
+        if (statusRes && statusRes.success && statusRes.data) {
+            const s = statusRes.data;
+            html += `
+                <div class="dl-card">
+                    <div class="dl-card-header">
+                        <i class="fas fa-info-circle"></i> Time-LLM 状态
+                    </div>
+                    <div class="dl-card-body">
+                        <div class="dl-rl-info">
+                            <div class="dl-info-row">
+                                <span>已训练:</span>
+                                <span>${s.is_trained ? '是' : '否'}</span>
+                            </div>
+                            <div class="dl-info-row">
+                                <span>模型数量:</span>
+                                <span>${s.model_count || 0}</span>
+                            </div>
+                            ${s.patchtst_trained !== undefined ? `
+                            <div class="dl-info-row">
+                                <span>PatchTST:</span>
+                                <span>${s.patchtst_trained ? '已训练' : '未训练'}</span>
+                            </div>
+                            ` : ''}
+                            ${s.mamba_trained !== undefined ? `
+                            <div class="dl-info-row">
+                                <span>Mamba:</span>
+                                <span>${s.mamba_trained ? '已训练' : '未训练'}</span>
+                            </div>
+                            ` : ''}
+                            ${s.diffusion_trained !== undefined ? `
+                            <div class="dl-info-row">
+                                <span>Diffusion:</span>
+                                <span>${s.diffusion_trained ? '已训练' : '未训练'}</span>
+                            </div>
+                            ` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        html += '</div>';
+        container.innerHTML = html;
+
+    } catch (e) {
+        console.error('loadTimeLLMPanel error:', e);
+        container.innerHTML = '<div class="dl-error">加载失败：' + e.message + '</div>';
+    }
+}
+
+// ═══════════════════════════════════════════════════
+// Regime-Switching 多模型预测面板
+// ═══════════════════════════════════════════════════
+
+async function loadRegimeSwitchingPanel(code) {
+    const container = document.getElementById('regime-switching-panel');
+    if (!container) return;
+
+    container.innerHTML = '<div class="loading"><i class="fas fa-spinner fa-spin"></i> 加载 Regime-Switching...</div>';
+
+    try {
+        const [predRes, statusRes, regimeRes] = await Promise.all([
+            apiGet(`${API_BASE}/api/regime-switching/predict/${code}`),
+            apiGet(`${API_BASE}/api/regime-switching/status`),
+            apiGet(`${API_BASE}/api/regime-switching/regime/${code}`)
+        ]);
+
+        let html = '<div class="dl-v2-grid">';
+
+        // 预测卡片
+        if (predRes && predRes.success && predRes.data) {
+            const p = predRes.data;
+            const dirClass = p.direction === 'bullish' ? 'bullish' : p.direction === 'bearish' ? 'bearish' : 'neutral';
+            const dirText = p.direction === 'up' ? '看涨' : p.direction === 'down' ? '看跌' : p.direction === 'bearish' ? '看跌' : '中性';
+
+            html += `
+                <div class="dl-card">
+                    <div class="dl-card-header">
+                        <i class="fas fa-random"></i> Regime-Switching 预测
+                    </div>
+                    <div class="dl-card-body">
+                        <div class="dl-prediction-main ${dirClass}">
+                            <div class="dl-direction">${dirText}</div>
+                            <div class="dl-confidence">置信度 ${(p.confidence * 100).toFixed(1)}%</div>
+                        </div>
+                        <div class="dl-prob-bars">
+                            <div class="dl-prob-row">
+                                <span>上涨</span>
+                                <div class="dl-prob-fill" style="width:${(p.probabilities?.up || 0) * 100}%"></div>
+                                <span>${((p.probabilities?.up || 0) * 100).toFixed(1)}%</span>
+                            </div>
+                            <div class="dl-prob-row">
+                                <span>中性</span>
+                                <div class="dl-prob-fill neutral" style="width:${(p.probabilities?.neutral || 0) * 100}%"></div>
+                                <span>${((p.probabilities?.neutral || 0) * 100).toFixed(1)}%</span>
+                            </div>
+                            <div class="dl-prob-row">
+                                <span>下跌</span>
+                                <div class="dl-prob-fill bearish" style="width:${(p.probabilities?.down || 0) * 100}%"></div>
+                                <span>${((p.probabilities?.down || 0) * 100).toFixed(1)}%</span>
+                            </div>
+                        </div>
+                        <div class="dl-rl-info" style="margin-top: 12px;">
+                            <div class="dl-info-row">
+                                <span>检测到的 Regime:</span>
+                                <span>${p.detected_regime || '未知'}</span>
+                            </div>
+                            <div class="dl-info-row">
+                                <span>Regime 置信度:</span>
+                                <span>${(p.regime_confidence * 100).toFixed(1)}%</span>
+                            </div>
+                            <div class="dl-info-row">
+                                <span>模型数量:</span>
+                                <span>${p.model_count || 0}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        } else {
+            html += `
+                <div class="dl-card">
+                    <div class="dl-card-header">
+                        <i class="fas fa-random"></i> Regime-Switching 预测
+                    </div>
+                    <div class="dl-card-body">
+                        <div class="dl-no-data">预测数据不可用</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // 模型排名卡片
+        if (statusRes && statusRes.success && statusRes.data) {
+            const s = statusRes.data;
+            const models = s.models || [];
+            const ranking = s.ranking || [];
+
+            html += `
+                <div class="dl-card">
+                    <div class="dl-card-header">
+                        <i class="fas fa-trophy"></i> 模型性能排名
+                    </div>
+                    <div class="dl-card-body">
+                        ${ranking.length > 0 ? `
+                        <div class="dl-rl-info">
+                            ${ranking.slice(0, 5).map((r, i) => `
+                                <div class="dl-info-row">
+                                    <span>#${i + 1} ${r.model || 'Model'}:</span>
+                                    <span>${(r.accuracy * 100).toFixed(1)}%</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                        ` : `
+                        <div class="dl-no-data">暂无排名数据</div>
+                        `}
+                    </div>
+                </div>
+            `;
+        }
+
+        // Regime 检测卡片
+        if (regimeRes && regimeRes.success && regimeRes.data) {
+            const r = regimeRes.data;
+            html += `
+                <div class="dl-card">
+                    <div class="dl-card-header">
+                        <i class="fas fa-chart-pie"></i> Regime 检测
+                    </div>
+                    <div class="dl-card-body">
+                        <div class="dl-rl-info">
+                            <div class="dl-info-row">
+                                <span>当前 Regime:</span>
+                                <span style="font-weight: 700; color: #3b82f6;">${r.regime || '未知'}</span>
+                            </div>
+                            <div class="dl-info-row">
+                                <span>Regime 概率:</span>
+                                <span>${(r.regime_probability * 100).toFixed(1)}%</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        html += '</div>';
+        container.innerHTML = html;
+
+    } catch (e) {
+        console.error('loadRegimeSwitchingPanel error:', e);
+        container.innerHTML = '<div class="dl-error">加载失败：' + e.message + '</div>';
+    }
+}
+
+// ═══════════════════════════════════════════════════
+// CVaR 仓位管理面板
+// ═══════════════════════════════════════════════════
+
+async function loadCVaRPositionPanel(code) {
+    const container = document.getElementById('cvar-position-panel');
+    if (!container) return;
+
+    try {
+        const data = await apiGet(`${API_BASE}/api/position/cvar/${code}`);
+        if (!data || !data.success) {
+            container.innerHTML = `<div style="color:#94a3b8;font-size:13px;">${data?.error || '加载失败'}</div>`;
+            return;
+        }
+
+        const pos = data.position || {};
+        const risk = data.risk || {};
+        const signal = data.signal || {};
+
+        const posColor = pos.vol_adjusted > 0.3 ? '#10b981' : pos.vol_adjusted > 0.1 ? '#3b82f6' : '#94a3b8';
+        const cvarColor = parseFloat(risk.cvar_95) > 3 ? '#ef4444' : parseFloat(risk.cvar_95) > 1.5 ? '#f59e0b' : '#10b981';
+
+        // 2026-09-09: 真实持仓对照区 (vs_position 来自 PortfolioStore, 无持仓时不渲染)
+        let vsHtml = '';
+        const v = data.vs_position;
+        if (v && v.has_position) {
+            const hintColor = (v.hint || '').includes('减') || (v.hint || '').includes('警戒') ? '#ef4444'
+                : (v.hint || '').includes('加仓') ? '#10b981' : '#94a3b8';
+            vsHtml = `
+                <div style="margin-top:12px;padding:10px;background:rgba(15,23,42,0.6);border:1px solid rgba(59,130,246,0.25);border-radius:6px;">
+                    <div style="font-size:12px;color:#94a3b8;margin-bottom:6px;"><i class="fas fa-briefcase"></i> 我的真实持仓 · ${v.name || code}</div>
+                    <div style="display:flex;justify-content:space-between;font-size:12px;color:#cbd5e1;"><span>成本 ¥${v.cost} × ${Number(v.qty).toLocaleString()} 股</span><span>市值 ¥${Number(v.market_value).toLocaleString()}</span></div>
+                    <div style="display:flex;justify-content:space-between;font-size:12px;color:#cbd5e1;margin-top:4px;"><span>实际仓位 <b style="color:#60a5fa;">${v.weight_actual_pct}%</b> <span style="color:#64748b;">vs 风险预算 ${v.budget_pct}%</span></span><span style="color:${v.pl_pct >= 0 ? '#10b981' : '#ef4444'};">浮${v.pl_pct >= 0 ? '盈' : '亏'} ${v.pl_pct}%</span></div>
+                    <div style="display:flex;justify-content:space-between;font-size:12px;margin-top:4px;"><span style="color:#94a3b8;">止损警戒 ¥${v.stop_line}</span><span style="color:${hintColor};font-weight:700;">${v.hint}</span></div>
+                </div>`;
+        }
+
+        let html = `
+            <div class="metric-cards">
+                <div class="metric-card">
+                    <div class="metric-label">Kelly 仓位</div>
+                    <div class="metric-value">${(pos.kelly_fraction * 100).toFixed(1)}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">CVaR 约束</div>
+                    <div class="metric-value">${(pos.cvar_constraint * 100).toFixed(1)}%</div>
+                </div>
+            </div>
+
+            <div style="margin-top:12px;padding:10px;background:rgba(59,130,246,0.1);border-radius:6px;text-align:center;">
+                <div style="font-size:12px;color:#94a3b8;">建议仓位</div>
+                <div style="font-size:28px;font-weight:700;color:${posColor};">${(pos.vol_adjusted * 100).toFixed(1)}%</div>
+                <div style="font-size:13px;color:#cbd5e1;margin-top:4px;">
+                    价值: ¥${(pos.position_value || 0).toLocaleString()}
+                </div>
+            </div>
+
+            <div class="metric-cards" style="margin-top:12px;">
+                <div class="metric-card">
+                    <div class="metric-label">CVaR (95%)</div>
+                    <div class="metric-value" style="color:${cvarColor};font-size:16px;">${risk.cvar_95}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">年化波动</div>
+                    <div class="metric-value" style="font-size:16px;">${risk.annualized_vol}%</div>
+                </div>
+            </div>
+
+            <div style="margin-top:10px;font-size:12px;color:#94a3b8;">
+                <div>胜率: ${risk.win_rate}% | 平均盈利: ${risk.avg_win}% | 平均亏损: ${risk.avg_loss}%</div>
+                <div style="margin-top:4px;">
+                    信号: <span style="color:${signal.direction === 'up' ? '#10b981' : signal.direction === 'down' ? '#ef4444' : '#94a3b8'};font-weight:700;">
+                        ${signal.direction === 'up' ? '↑ 看涨' : signal.direction === 'down' ? '↓ 看跌' : '→ 中性'}
+                    </span>
+                    | 置信度: ${(signal.confidence * 100).toFixed(0)}%
+                </div>
+            </div>
+        `;
+
+        container.innerHTML = html + vsHtml;
+
+    } catch (e) {
+        console.error('loadCVaRPositionPanel error:', e);
+        container.innerHTML = '<div style="color:#94a3b8;font-size:13px;">加载失败</div>';
+    }
+}
+
+// ═══════════════════════════════════════════════════
+// MLOps 管道面板
+// ═══════════════════════════════════════════════════
+
+async function loadMLOpsPanel(code) {
+    const container = document.getElementById('mlops-panel');
+    if (!container) return;
+
+    try {
+        // 并行加载 MLOps 状态和漂移状态
+        const [statusRes, driftRes, checkRes] = await Promise.allSettled([
+            apiGet(`${API_BASE}/api/mlops/status`),
+            apiGet(`${API_BASE}/api/mlops/drift-status`),
+            apiGet(`${API_BASE}/api/mlops/check-retrain/${code}`),
+        ]);
+
+        const status = statusRes.status === 'fulfilled' ? statusRes.value : null;
+        const drift = driftRes.status === 'fulfilled' ? driftRes.value : null;
+        const check = checkRes.status === 'fulfilled' ? checkRes.value : null;
+
+        if (!status) {
+            container.innerHTML = '<div style="color:#94a3b8;font-size:13px;">MLOps 服务不可用</div>';
+            return;
+        }
+
+        const statusVal = status.status || 'idle';
+        const statusColors = {
+            idle: '#94a3b8', monitoring: '#3b82f6', training: '#f59e0b',
+            a_b_testing: '#8b5cf6', deploying: '#06b6d4', error: '#ef4444',
+        };
+        const statusLabels = {
+            idle: '⏸ 空闲', monitoring: '👁 监控中', training: '🔄 训练中',
+            a_b_testing: '🧪 A/B 测试', deploying: '🚀 部署中', error: '❌ 错误',
+        };
+
+        const modules = status.modules || {};
+        const moduleList = [
+            { name: '漂移检测', key: 'drift_detector', icon: 'fa-exclamation-triangle' },
+            { name: '重训练触发', key: 'retrain_trigger', icon: 'fa-rotate' },
+            { name: 'A/B 测试', key: 'ab_test', icon: 'fa-flask' },
+            { name: '模型注册', key: 'model_registry', icon: 'fa-database' },
+            { name: '训练管道', key: 'training_pipeline', icon: 'fa-gears' },
+        ];
+
+        let modulesHTML = moduleList.map(m => `
+            <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:#cbd5e1;">
+                <i class="fas ${modules[m.key] ? 'fa-circle-check' : 'fa-circle-xmark'}"
+                   style="color:${modules[m.key] ? '#10b981' : '#ef4444'};"></i>
+                ${m.name}
+            </div>
+        `).join('');
+
+        let retrainHTML = '';
+        if (check && check.need_retrain) {
+            retrainHTML = `
+                <div style="margin-top:8px;padding:8px;background:rgba(245,158,246,0.1);border-radius:4px;font-size:12px;color:#f59e0b;">
+                    <i class="fas fa-exclamation-triangle"></i> 需要重训练: ${check.reasons.join(', ')}
+                </div>
+            `;
+        }
+
+        let driftHTML = '';
+        if (drift && drift.drift_detected) {
+            driftHTML = `
+                <div style="margin-top:8px;padding:8px;background:rgba(239,68,68,0.1);border-radius:4px;font-size:12px;color:#ef4444;">
+                    <i class="fas fa-exclamation-triangle"></i> 检测到概念漂移!
+                </div>
+            `;
+        }
+
+        let html = `
+            <div style="text-align:center;padding:8px;background:rgba(15,23,42,0.5);border-radius:6px;margin-bottom:10px;">
+                <div style="font-size:12px;color:#94a3b8;">管道状态</div>
+                <div style="font-size:16px;font-weight:700;color:${statusColors[statusVal] || '#94a3b8'};">
+                    ${statusLabels[statusVal] || statusVal}
+                </div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
+                <div style="text-align:center;padding:8px;background:rgba(59,130,246,0.1);border-radius:6px;">
+                    <div style="font-size:11px;color:#94a3b8;">重训练次数</div>
+                    <div style="font-size:20px;font-weight:700;color:#3b82f6;">${status.retrain_count || 0}</div>
+                </div>
+                <div style="text-align:center;padding:8px;background:rgba(16,185,129,0.1);border-radius:6px;">
+                    <div style="font-size:11px;color:#94a3b8;">部署次数</div>
+                    <div style="font-size:20px;font-weight:700;color:#10b981;">${status.deployment_count || 0}</div>
+                </div>
+            </div>
+
+            <div style="margin-bottom:10px;">
+                <div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">模块状态</div>
+                ${modulesHTML}
+            </div>
+
+            ${retrainHTML}
+            ${driftHTML}
+
+            <div style="margin-top:8px;font-size:11px;color:#64748b;">
+                上次漂移: ${status.last_drift_time ? new Date(status.last_drift_time).toLocaleString('zh-CN') : '无'}
+                <br>
+                上次部署: ${status.last_deployment_time ? new Date(status.last_deployment_time).toLocaleString('zh-CN') : '无'}
+            </div>
+        `;
+
+        container.innerHTML = html;
+
+    } catch (e) {
+        console.error('loadMLOpsPanel error:', e);
+        container.innerHTML = '<div style="color:#94a3b8;font-size:13px;">加载失败</div>';
+    }
+}
+
+// ============================================================================
+// P0-5: 多模态融合预测面板
+// ============================================================================
+
+async function loadFusionPanel(code) {
+    const container = document.getElementById('fusion-panel');
+    if (!container) return;
+
+    try {
+        const resp = await apiGet(`${API_BASE}/api/fusion/multi-modal?stock_code=${code}&cache=false`);
+        if (!resp || !resp.success) {
+            container.innerHTML = '<div style="color:#94a3b8;font-size:13px;">融合预测服务不可用</div>';
+            return;
+        }
+
+        const d = resp;
+        const dirColor = d.direction === 'up' ? '#10b981' : d.direction === 'down' ? '#ef4444' : '#d29922';
+        const dirIcon = d.direction === 'up' ? '📈' : d.direction === 'down' ? '📉' : '➡️';
+        const dirText = d.direction === 'up' ? '看涨' : d.direction === 'down' ? '看跌' : '震荡';
+
+        const weights = d.modality_weights || {};
+        const scores = d.scores || {};
+        const mods = d.modalities || {};
+        const modLabels = {price: '📊 价格', sentiment: '💬 情感', fundamental: '📋 基本面'};
+
+        let html = `
+            <div style="text-align:center;padding:10px;background:rgba(15,23,42,0.5);border-radius:6px;margin-bottom:10px;">
+                <div style="font-size:20px;">${dirIcon}</div>
+                <div style="font-size:16px;font-weight:700;color:${dirColor};">${dirText}</div>
+                <div style="font-size:12px;color:#94a3b8;">置信度 ${(d.confidence * 100).toFixed(1)}% | Regime: ${d.regime} | 一致度 ${(d.consensus * 100).toFixed(0)}%</div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
+                <div style="padding:6px;background:rgba(59,130,246,0.1);border-radius:4px;font-size:12px;">
+                    <div style="color:#94a3b8;">📊 价格权重</div>
+                    <div style="color:#60a5fa;font-weight:700;">${((weights.price || 0) * 100).toFixed(0)}%</div>
+                </div>
+                <div style="padding:6px;background:rgba(59,130,246,0.1);border-radius:4px;font-size:12px;">
+                    <div style="color:#94a3b8;">💬 情感权重</div>
+                    <div style="color:#60a5fa;font-weight:700;">${((weights.sentiment || 0) * 100).toFixed(0)}%</div>
+                </div>
+                <div style="padding:6px;background:rgba(59,130,246,0.1);border-radius:4px;font-size:12px;">
+                    <div style="color:#94a3b8;">📋 基本面权重</div>
+                    <div style="color:#60a5fa;font-weight:700;">${((weights.fundamental || 0) * 100).toFixed(0)}%</div>
+                </div>
+                <div style="padding:6px;background:rgba(59,130,246,0.1);border-radius:4px;font-size:12px;">
+                    <div style="color:#94a3b8;">模态一致度</div>
+                    <div style="color:#60a5fa;font-weight:700;">${(d.consensus * 100).toFixed(0)}%</div>
+                </div>
+            </div>
+
+            <div style="font-size:12px;">
+                <div style="color:#94a3b8;margin-bottom:4px;">方向得分</div>
+                <div style="display:flex;justify-content:space-between;padding:2px 0;">
+                    <span>📈 看涨</span><span style="color:#10b981;">${((scores.up || 0) * 100).toFixed(1)}%</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;padding:2px 0;">
+                    <span>➡️ 震荡</span><span style="color:#d29922;">${((scores.neutral || 0) * 100).toFixed(1)}%</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;padding:2px 0;">
+                    <span>📉 看跌</span><span style="color:#ef4444;">${((scores.down || 0) * 100).toFixed(1)}%</span>
+                </div>
+            </div>
+
+            <div style="margin-top:8px;font-size:12px;">
+                <div style="color:#94a3b8;margin-bottom:4px;">各模态信号</div>
+                ${Object.entries(mods).map(([key, mod]) => {
+                    const dir = mod.direction === 'up' ? '📈' : mod.direction === 'down' ? '📉' : '➡️';
+                    return `<div style="display:flex;justify-content:space-between;padding:2px 0;">
+                        <span>${modLabels[key] || key}</span><span>${dir} ${(mod.confidence * 100).toFixed(0)}%</span>
+                    </div>`;
+                }).join('')}
+            </div>
+        `;
+
+        container.innerHTML = html;
+
+    } catch (e) {
+        console.error('loadFusionPanel error:', e);
+        container.innerHTML = '<div style="color:#94a3b8;font-size:13px;">加载失败</div>';
+    }
+}
+
+// ============================================================================
+// P0-6: 金丝雀部署面板
+// ============================================================================
+
+async function loadCanaryPanel() {
+    const container = document.getElementById('canary-panel');
+    if (!container) return;
+
+    try {
+        const resp = await apiGet(`${API_BASE}/api/mlops/canary/status`);
+        if (!resp || !resp.success) {
+            container.innerHTML = '<div style="color:#94a3b8;font-size:13px;">金丝雀部署服务不可用</div>';
+            return;
+        }
+
+        const active = resp.active_count || 0;
+        const deployments = resp.deployments || {};
+        const keys = Object.keys(deployments);
+
+        const statusColors = {
+            promoted: '#10b981', rolled_back: '#ef4444', scaling: '#d29922',
+            active: '#3b82f6', ended: '#94a3b8',
+        };
+        const statusTexts = {
+            promoted: '已提升', rolled_back: '已回滚', scaling: '流量提升中',
+            active: '活跃', ended: '已结束',
+        };
+
+        // 流量阶梯可视化
+        const steps = [5, 25, 50, 100];
+
+        let html = `
+            <div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
+                活跃部署: <span style="color:${active > 0 ? '#10b981' : '#94a3b8'};font-weight:700;">${active}</span>
+            </div>
+
+            <!-- 启动金丝雀按钮 -->
+            <button onclick="startCanaryDeploy()" style="
+                width: 100%; margin-top: 8px; padding: 8px;
+                background: linear-gradient(135deg, #3b82f6, #2563eb);
+                color: white; border: none; border-radius: 6px;
+                cursor: pointer; font-size: 13px; font-weight: 600;
+            ">
+                🚀 启动金丝雀部署
+            </button>
+
+            <!-- 流量阶梯 -->
+            <div style="margin-top:10px;padding:8px;background:rgba(15,23,42,0.5);border-radius:6px;">
+                <div style="font-size:11px;color:#94a3b8;margin-bottom:6px;">流量阶梯</div>
+                <div style="display:flex;gap:4px;">
+                    ${steps.map((s, i) => `
+                        <div style="flex:1;text-align:center;padding:4px 0;background:rgba(59,130,246,0.1);border-radius:4px;font-size:11px;color:#60a5fa;">
+                            ${s}%
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+
+            <!-- 回滚条件 -->
+            <div style="margin-top:8px;font-size:11px;color:#94a3b8;">
+                <div style="color:#ef4444;margin-bottom:2px;">⚠️ 自动回滚条件:</div>
+                <div>• Canary 准确率 &lt; 55%</div>
+                <div>• 比稳定模型差 &gt; 2%</div>
+            </div>
+        `;
+
+        for (const [code, dep] of Object.entries(deployments)) {
+            const sc = statusColors[dep.status] || '#3b82f6';
+            const st = statusTexts[dep.status] || dep.status;
+            const canaryAcc = dep.canary_total > 0
+                ? (dep.canary_correct / dep.canary_total * 100).toFixed(1)
+                : '-';
+            const currentStep = dep.traffic_step || 0;
+
+            // 流量进度条
+            const progressWidth = (currentStep / (steps.length - 1)) * 100;
+
+            html += `
+                <div style="margin-top:8px;padding:8px;background:rgba(15,23,42,0.5);border-radius:6px;">
+                    <div style="font-weight:bold;color:${sc};margin-bottom:4px;">${code} — ${st}</div>
+                    <div style="font-size:11px;color:#94a3b8;">${dep.old_version} → ${dep.new_version}</div>
+                    <div style="font-size:11px;color:#94a3b8;margin-top:2px;">
+                        流量: ${(dep.traffic_ratio * 100).toFixed(0)}%
+                        <span style="display:inline-block;width:60px;height:4px;background:rgba(255,255,255,0.1);border-radius:2px;vertical-align:middle;margin-left:4px;">
+                            <span style="display:block;width:${progressWidth}%;height:100%;background:#3b82f6;border-radius:2px;"></span>
+                        </span>
+                    </div>
+                    <div style="font-size:11px;color:#94a3b8;">评估: ${dep.canary_total} 次 | Canary 准确率: ${canaryAcc}%</div>
+                    ${dep.end_reason ? `<div style="font-size:11px;color:#94a3b8;margin-top:2px;">原因: ${dep.end_reason}</div>` : ''}
+                </div>
+            `;
+        }
+
+        if (keys.length === 0) {
+            html += '<div style="color:#94a3b8;font-size:12px;margin-top:8px;text-align:center;">点击上方按钮启动金丝雀部署</div>';
+        }
+
+        container.innerHTML = html;
+
+    } catch (e) {
+        console.error('loadCanaryPanel error:', e);
+        container.innerHTML = '<div style="color:#94a3b8;font-size:13px;">加载失败</div>';
+    }
+}
+
+// 启动金丝雀部署
+async function startCanaryDeploy() {
+    // 获取当前选中的股票代码
+    const stockSelect = document.getElementById('analysisStockSelect');
+    const stockCode = stockSelect ? stockSelect.value : 'sz300620';
+
+    try {
+        const resp = await fetch(`${API_BASE}/api/mlops/canary/deploy`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                stock_code: stockCode,
+                new_version: 'v2.1',
+                old_version: 'v2.0',
+            }),
+        });
+        const data = await resp.json();
+        if (data.success) {
+            alert(`金丝雀部署已启动!\n${stockCode}: v2.0 → v2.1 (流量 5%)`);
+            loadCanaryPanel();
+        } else {
+            alert('启动失败: ' + (data.error || '未知错误'));
+        }
+    } catch (e) {
+        alert('请求失败: ' + e.message);
+    }
+}
+
+// ═══════════════════════════════════════════════════
+// 每日晨报研报 (2026-09-09): 实时 Tab 呈现 + 08:00 链 + 手动触发 + 轮询
+// ═══════════════════════════════════════════════════
+let _drPollTimer = null;
+
+function _renderDailyReport(rep) {
+    const box = document.getElementById('dailyReportContent');
+    const dateEl = document.getElementById('drDate');
+    if (!box) return;
+    if (!rep || !rep.report_md) {
+        if (dateEl) dateEl.textContent = '';
+        box.innerHTML = '<div style="color:#94a3b8;font-size:13px;">暂无晨报 (每日 08:00 自动生成, 或点「立即生成」)</div>';
+        return;
+    }
+    if (dateEl) {
+        dateEl.textContent = `${rep.date || ''} · ${rep.trigger === 'manual' ? '手动' : '自动'} · ${rep.elapsed_s || '?'}s`
+            + (rep.llm_degraded ? ' · ⚠ LLM 降级 (规则模板)' : '');
+    }
+    const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    let html = esc(rep.report_md)
+        .replace(/^#{1,4} (.+)$/gm, '<b style="color:#60a5fa;">$1</b>')
+        .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+    if (rep.source_errors && rep.source_errors.length) {
+        html += `\n\n<b style="color:#f59e0b;">⚠ 数据源: ${esc(rep.source_errors.join('; '))}</b>`;
+    }
+    box.innerHTML = `<div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:#e2e8f0;">${html}</div>`;
+}
+
+function _setDrBtn(busy) {
+    const btn = document.getElementById('drTriggerBtn');
+    if (!btn) return;
+    btn.disabled = !busy;
+    btn.innerHTML = busy
+        ? '<i class="fas fa-spinner fa-spin"></i> 生成中…'
+        : '<i class="fas fa-bolt"></i> 立即生成';
+}
+
+async function loadDailyReport() {
+    const box = document.getElementById('dailyReportContent');
+    if (!box) return;
+    try {
+        const r = await fetch(`${API_BASE}/api/daily_report`);
+        const data = await r.json();
+        _renderDailyReport(data.report);
+        if (data.generating) { _setDrBtn(true); _drStartPolling(); }
+    } catch (e) {
+        console.error('loadDailyReport error:', e);
+    }
+}
+
+function _drStartPolling() {
+    if (_drPollTimer) return;
+    let n = 0;
+    _drPollTimer = setInterval(async () => {
+        if (++n > 24) {  // 24×5s = 120s 上限, 超时不吞错 (控制台可见)
+            clearInterval(_drPollTimer); _drPollTimer = null;
+            console.warn('[DailyReport] 生成超时 (120s), 停止轮询');
+            _setDrBtn(false);
+            return;
+        }
+        try {
+            const r = await fetch(`${API_BASE}/api/daily_report`);
+            const d = await r.json();
+            if (!d.generating) {
+                clearInterval(_drPollTimer); _drPollTimer = null;
+                _setDrBtn(false);
+                _renderDailyReport(d.report);
+            }
+        } catch (e) {
+            console.error('[DailyReport] 轮询失败 (继续重试):', e);
+        }
+    }, 5000);
+}
+
+window.triggerDailyReport = async function () {
+    try {
+        const r = await fetch(`${API_BASE}/api/daily_report`, { method: 'POST' });
+        const d = await r.json();
+        if (d.success) {
+            _setDrBtn(true);
+            const box = document.getElementById('dailyReportContent');
+            if (box) box.innerHTML =
+                '<div class="loading">晨报链启动: 美股行情 → 国际资讯 → 持仓量化 → LLM 汇编 (约 40-120s)…</div>';
+            _drStartPolling();
+        } else {
+            alert(d.error || '触发失败');
+        }
+    } catch (e) {
+        alert('触发失败: ' + e.message);
+    }
+};
+
+// 加载时机: 进入「实时」Tab 时触发 (index.html nav onclick 调 loadDailyReport);
+// 08:00 自动链/手动触发后轮询也走 _drStartPolling → 同一渲染函数

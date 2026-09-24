@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+# -*- coding:utf-8 -*-
+"""
+实时图神经网络 (Real-time Dynamic GNN)
+
+增强版动态图 GNN，支持:
+- 实时图结构更新 (滑动窗口相关性)
+- 跨市场信号检测 (美股→A股→港股传导)
+- 图注意力机制 (GAT 简化版)
+- 实时节点嵌入更新
+
+用法:
+    gnn = RealTimeGNN()
+    signal = gnn.detect_cross_market_signal(predictions)
+    adj = gnn.update_graph(returns_matrix)
+"""
+
+import numpy as np
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any, Tuple
+from dataclasses import dataclass, field, asdict
+
+from modules.logger import logger
+
+
+@dataclass
+class CrossMarketSignal:
+    """跨市场信号"""
+    source_market: str
+    target_market: str
+    signal_type: str  # momentum/sentiment/volatility
+    strength: float  # 0-1
+    lag_days: int  # 传导延迟
+    confidence: float  # 0-1
+    timestamp: str = ''
+
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+
+@dataclass
+class GraphNode:
+    """图节点"""
+    node_id: str
+    market: str  # us/hk/cn
+    industry: str
+    features: np.ndarray  # 节点特征
+    attention_weight: float = 1.0  # 注意力权重
+
+    def to_dict(self) -> Dict:
+        return {
+            'node_id': self.node_id,
+            'market': self.market,
+            'industry': self.industry,
+            'features_dim': len(self.features),
+            'attention_weight': self.attention_weight,
+        }
+
+
+class RealTimeGNN:
+    """实时图神经网络"""
+
+    def __init__(
+        self,
+        window_size: int = 60,  # 滑动窗口大小
+        corr_threshold: float = 0.5,  # 相关性阈值
+        update_interval: int = 5,  # 更新间隔 (交易日)
+        n_layers: int = 2,  # GNN 层数
+        hidden_dim: int = 64,  # 隐藏层维度
+    ):
+        self.window_size = window_size
+        self.corr_threshold = corr_threshold
+        self.update_interval = update_interval
+        self.n_layers = n_layers
+        self.hidden_dim = hidden_dim
+
+        # 图状态
+        self._nodes: Dict[str, GraphNode] = {}
+        self._adjacency: np.ndarray = None
+        self._node_ids: List[str] = []
+        self._returns_history: Dict[str, List[float]] = {}
+        self._last_update = 0
+        self._cross_signals: List[CrossMarketSignal] = []
+
+        # 图注意力参数 (简化: 可学习)
+        self._attention_params = {}
+
+    def add_stock(self, stock_code: str, market: str, industry: str, features: np.ndarray):
+        """添加股票节点"""
+        node = GraphNode(
+            node_id=stock_code,
+            market=market,
+            industry=industry,
+            features=features,
+        )
+        self._nodes[stock_code] = node
+        self._node_ids.append(stock_code)
+
+        if stock_code not in self._returns_history:
+            self._returns_history[stock_code] = []
+
+        logger.info(f"[RealTimeGNN] 添加节点: {stock_code} ({market}/{industry})")
+
+    def update_returns(self, stock_code: str, returns: List[float]):
+        """更新收益率历史"""
+        if stock_code not in self._returns_history:
+            self._returns_history[stock_code] = []
+        self._returns_history[stock_code].extend(returns)
+
+        # 保持窗口大小
+        if len(self._returns_history[stock_code]) > self.window_size:
+            self._returns_history[stock_code] = self._returns_history[stock_code][-self.window_size:]
+
+    def update_graph(self) -> np.ndarray:
+        """
+        更新图结构 (基于滚动相关性)
+
+        Returns:
+            更新后的邻接矩阵
+        """
+        if len(self._node_ids) < 2:
+            return self._adjacency
+
+        # 计算收益率矩阵
+        n = len(self._node_ids)
+        returns_matrix = np.zeros((n, self.window_size))
+
+        for i, code in enumerate(self._node_ids):
+            history = self._returns_history.get(code, [])
+            if len(history) >= self.window_size:
+                returns_matrix[i] = history[-self.window_size:]
+            elif history:
+                returns_matrix[i, :len(history)] = history
+
+        # 计算相关性矩阵
+        if returns_matrix.std(axis=1).min() < 1e-8:
+            return self._adjacency
+
+        corr_matrix = np.corrcoef(returns_matrix)
+        if np.isnan(corr_matrix).any():
+            corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
+
+        # 阈值过滤 + 归一化
+        adj = np.abs(corr_matrix)
+        adj[adj < self.corr_threshold] = 0
+        np.fill_diagonal(adj, 0)  # 无自环
+
+        # 行归一化 (GCN 风格)
+        degree = adj.sum(axis=1, keepdims=True)
+        degree[degree == 0] = 1.0
+        adj = adj / degree
+
+        self._adjacency = adj
+        self._last_update = datetime.now()
+
+        logger.info(f"[RealTimeGNN] 图更新: {n} 节点, {adj.sum() / 2:.0f} 边")
+        return adj
+
+    def forward(self, node_features: np.ndarray) -> np.ndarray:
+        """
+        GNN 前向传播 (简化 GCN)
+
+        Args:
+            node_features: (n_nodes, n_features)
+
+        Returns:
+            节点嵌入 (n_nodes, hidden_dim)
+        """
+        if self._adjacency is None or len(self._node_ids) == 0:
+            return node_features
+
+        n = node_features.shape[0]
+        hidden = node_features
+
+        for layer in range(self.n_layers):
+            # GCN 层: H' = A * H * W
+            if self._adjacency is not None:
+                hidden = self._adjacency[:n, :n] @ hidden
+
+            # 非线性激活 (简化: ReLU 近似)
+            hidden = np.maximum(hidden, 0)
+
+            # 注意力加权
+            if self._node_ids[:n]:
+                weights = np.array([
+                    self._nodes[code].attention_weight
+                    for code in self._node_ids[:n]
+                ]).reshape(-1, 1)
+                hidden = hidden * weights
+
+        # 投影到隐藏维度
+        if hidden.shape[1] != self.hidden_dim:
+            # 简化投影: 随机权重
+            if 'W_proj' not in self._attention_params:
+                self._attention_params['W_proj'] = np.random.randn(
+                    max(hidden.shape[1], 1), self.hidden_dim
+                ) * 0.01
+            hidden = hidden @ self._attention_params['W_proj']
+
+        return hidden
+
+    def detect_cross_market_signal(self, market_predictions: Dict[str, Dict]) -> List[CrossMarketSignal]:
+        """
+        检测跨市场信号传导
+
+        Args:
+            market_predictions: {market: {'predictions': [...], 'sentiment': 0.5, ...}}
+
+        Returns:
+            跨市场信号列表
+        """
+        signals = []
+        markets = list(market_predictions.keys())
+
+        # 检测美股 → A 股传导
+        if 'us' in market_predictions and 'cn' in market_predictions:
+            us_sentiment = market_predictions['us'].get('sentiment', 0)
+            cn_sentiment = market_predictions['cn'].get('sentiment', 0)
+
+            if abs(us_sentiment) > 0.3:
+                signal = CrossMarketSignal(
+                    source_market='us',
+                    target_market='cn',
+                    signal_type='sentiment',
+                    strength=min(1.0, abs(us_sentiment)),
+                    lag_days=1,
+                    confidence=0.7,
+                    timestamp=datetime.now().isoformat(),
+                )
+                signals.append(signal)
+                self._cross_signals.append(signal)
+
+        # 检测美股 → 港股传导
+        if 'us' in market_predictions and 'hk' in market_predictions:
+            us_return = market_predictions['us'].get('avg_return', 0)
+            if abs(us_return) > 0.02:  # 美股涨跌幅 > 2%
+                signal = CrossMarketSignal(
+                    source_market='us',
+                    target_market='hk',
+                    signal_type='momentum',
+                    strength=min(1.0, abs(us_return) * 10),
+                    lag_days=1,
+                    confidence=0.6,
+                    timestamp=datetime.now().isoformat(),
+                )
+                signals.append(signal)
+                self._cross_signals.append(signal)
+
+        # 检测 A 股 → 港股传导
+        if 'cn' in market_predictions and 'hk' in market_predictions:
+            cn_return = market_predictions['cn'].get('avg_return', 0)
+            if abs(cn_return) > 0.015:
+                signal = CrossMarketSignal(
+                    source_market='cn',
+                    target_market='hk',
+                    signal_type='momentum',
+                    strength=min(1.0, abs(cn_return) * 10),
+                    lag_days=0,
+                    confidence=0.5,
+                    timestamp=datetime.now().isoformat(),
+                )
+                signals.append(signal)
+                self._cross_signals.append(signal)
+
+        if signals:
+            logger.info(f"[RealTimeGNN] 检测到 {len(signals)} 个跨市场信号")
+
+        return signals
+
+    def get_node_embeddings(self) -> Dict[str, np.ndarray]:
+        """获取所有节点嵌入"""
+        if not self._node_ids:
+            return {}
+
+        features = np.array([self._nodes[code].features for code in self._node_ids])
+        embeddings = self.forward(features)
+
+        return {code: embeddings[i] for i, code in enumerate(self._node_ids)}
+
+    def get_status(self) -> Dict:
+        """获取图状态"""
+        n_edges = 0
+        if self._adjacency is not None:
+            n_edges = int(np.sum(self._adjacency > 0) / 2)
+
+        return {
+            'n_nodes': len(self._nodes),
+            'n_edges': n_edges,
+            'node_ids': self._node_ids,
+            'last_update': str(self._last_update) if self._last_update else None,
+            'cross_signals': [s.to_dict() for s in self._cross_signals[-10:]],
+            'markets': list(set(n.market for n in self._nodes.values())),
+        }
+
+    def reset(self):
+        """重置"""
+        self._nodes.clear()
+        self._node_ids.clear()
+        self._returns_history.clear()
+        self._adjacency = None
+        self._cross_signals.clear()
+
+
+# 全局单例
+_realtime_gnn: Optional[RealTimeGNN] = None
+
+
+def get_realtime_gnn() -> RealTimeGNN:
+    """获取实时 GNN 全局实例"""
+    global _realtime_gnn
+    if _realtime_gnn is None:
+        _realtime_gnn = RealTimeGNN()
+    return _realtime_gnn

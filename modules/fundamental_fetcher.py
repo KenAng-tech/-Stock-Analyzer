@@ -18,6 +18,7 @@
 
 import re
 import time
+import concurrent.futures
 import numpy as np
 from typing import Dict, List, Optional
 from datetime import datetime
@@ -107,8 +108,13 @@ class FundamentalFetcher:
             return data
 
         try:
-            # 获取利润表数据（所有报表共用同一接口）
-            df = self._ak.stock_financial_abstract_ths(symbol=stock_code, indicator="利润表")
+            # 获取利润表数据（所有报表共用同一接口）— 带超时保护
+            def _fetch():
+                return self._ak.stock_financial_abstract_ths(symbol=stock_code, indicator="利润表")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_fetch)
+                df = future.result(timeout=15)  # 15s 超时
 
             if df is None or len(df) == 0:
                 raise ValueError("AKShare 返回空数据")
@@ -314,7 +320,8 @@ class FundamentalFetcher:
             估值判断字典
         """
         if pe <= 0:
-            return {"level": "无法判断", "percentile": 0, "description": "亏损或 PE 异常"}
+            # 形状完整 (2026-09-19): 消费方 analysis_engine 读 pe_ratio/level/description, 缺键即 KeyError
+            return {"level": "无法判断", "percentile": 0, "pe_ratio": 0, "description": "亏损或 PE 异常"}
 
         ratio = pe / industry_avg_pe if industry_avg_pe > 0 else 1.0
 

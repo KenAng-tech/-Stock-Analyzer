@@ -96,7 +96,7 @@ K线形态: {kline_pattern}
                     content = content.split("```")[1] if "```" in content[3:] else content
                     content = content.strip()
                 data = json.loads(content)
-            except:
+            except Exception:
                 # JSON 解析失败，使用默认推理结果
                 data = {
                     "consistency_score": 0.5,

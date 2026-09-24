@@ -54,6 +54,25 @@ class ATRCalculator:
             atr = true_range
         
         return round(atr, 2)
+
+    def calculate_atr_from_data(self, stock_data: Dict) -> Dict:
+        """Calculate ATR and return full result dict (wrapper for calculate_atr_ema)."""
+        atr = self.calculate_atr_ema(stock_data)
+        price = stock_data.get('price', 0)
+        vol_level = self.assess_volatility_level(stock_data)
+        stop_mult = self.get_adaptive_multiplier(stock_data, 'stop')
+        profit_mult = self.get_adaptive_multiplier(stock_data, 'profit')
+        return {
+            'atr': atr,
+            'atr_multiplier': stop_mult,
+            'stop_loss': round(price - atr * stop_mult, 2),
+            'stop_loss_pct': round((atr * stop_mult / price) * 100, 2) if price > 0 else 0,
+            'take_profit': round(price + atr * profit_mult, 2),
+            'take_profit_pct': round((atr * profit_mult / price) * 100, 2) if price > 0 else 0,
+            'volatility_level': vol_level,
+            'type': 'dynamic_ema',
+        }
+
     
     def assess_volatility_level(self, stock_data: Dict) -> str:
         """
